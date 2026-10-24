@@ -1,4 +1,6 @@
+use crate::ocr;
 use anyhow::{anyhow, bail, Context, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::{Cursor, Read, Seek};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -172,7 +174,7 @@ fn pdf_text_inner(bytes: &[u8]) -> Result<String> {
             .map_err(|_| anyhow!("PDF 已加密，无法提取文字"))?;
     }
     let pages = doc.get_pages();
-    let mut out = String::new();
+    let mut page_texts: BTreeMap<u32, String> = BTreeMap::new();
     let mut failed = 0usize;
 
     for &page_num in pages.keys() {
@@ -181,18 +183,58 @@ fn pdf_text_inner(bytes: &[u8]) -> Result<String> {
             let mut output = pdf_extract::PlainTextOutput::new(&mut page);
             pdf_extract::output_doc_page(&doc, &mut output, page_num)
         }));
-        if !matches!(outcome, Ok(Ok(()))) {
-            failed += 1;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                failed += 1;
+                log::warn!("PDF 第 {page_num} 页解析失败，已跳过：{err}");
+            }
+            Err(_) => {
+                failed += 1;
+                log::warn!("PDF 第 {page_num} 页触发解析器 panic，已跳过");
+            }
         }
         // A panic mid-page can still leave the text written so far, so keep it.
         if !page.trim().is_empty() {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(page.trim_end());
+            page_texts.insert(page_num, page.trim_end().to_string());
         }
     }
 
+    if ocr::textless_pdf_enabled() && ocr::is_enabled() {
+        let min_chars = ocr::min_text_chars();
+        let missing: Vec<u32> = pages
+            .keys()
+            .copied()
+            .filter(|page| {
+                page_texts
+                    .get(page)
+                    .map(|text| text.trim().chars().count() < min_chars)
+                    .unwrap_or(true)
+            })
+            .collect();
+        if !missing.is_empty() {
+            log::info!(
+                "PDF 有 {} 页缺少文字层，尝试 OCR（文件哈希缓存）",
+                missing.len()
+            );
+            let ocr_texts = ocr::recognize_pages(bytes, &missing);
+            for (page, text) in ocr_texts {
+                if !text.trim().is_empty() {
+                    page_texts.insert(page, text);
+                }
+            }
+        }
+    }
+
+    let out = page_texts
+        .values()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if failed > 0 {
+        log::warn!("PDF 提取完成：{} 页中 {failed} 页失败，其余页已保留", pages.len());
+    }
     if out.trim().is_empty() && failed > 0 {
         bail!("PDF 提取失败：{failed}/{} 页解析错误", pages.len());
     }

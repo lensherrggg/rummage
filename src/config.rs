@@ -35,6 +35,7 @@ pub struct Config {
     pub watch: WatchConfig,
     pub index: IndexConfig,
     pub search: SearchConfig,
+    pub ocr: OcrConfig,
     pub include: IncludeConfig,
     pub ignore: IgnoreConfig,
     pub normalize: NormalizeConfig,
@@ -58,12 +59,24 @@ impl Default for WatchConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct IndexConfig {
     pub dir: Option<PathBuf>,
     /// 参与索引的文件扩展名；省略时使用 [`DEFAULT_EXTENSIONS`]。
     pub extensions: Option<Vec<String>>,
+    /// 是否处理无文字层 PDF。`false` 时连 OCR 也不做，直接跳过。
+    pub textless_pdf: bool,
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            extensions: None,
+            textless_pdf: true,
+        }
+    }
 }
 
 pub const DEFAULT_EXTENSIONS: &[&str] = &["md", "markdown", "docx", "pdf", "ofd"];
@@ -91,6 +104,54 @@ impl Default for SearchConfig {
 /// Formats whose bytes are not plain UTF-8 text. Accepting them now would index
 /// binary garbage; they need a text-extraction layer first.
 const UNSUPPORTED_BINARY_EXTENSIONS: &[&str] = &["doc", "xls", "xlsx", "ppt", "pptx"];
+
+/// 可选的扫描件 OCR：PDFium 负责渲染，RapidOCR/PP-OCRv4 ONNX 负责识别。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OcrConfig {
+    /// 默认开启；模型或 PDFium 缺失时自动降级为只处理文字层。
+    pub enabled: bool,
+    /// OCR 模型目录，默认是 exe 同目录的 `models\ocr`。
+    pub dir: Option<PathBuf>,
+    /// PDFium 动态库路径，默认是 exe 同目录的 `pdfium.dll`。
+    pub pdfium: Option<PathBuf>,
+    pub dpi: u32,
+    /// 单个 PDF 最多 OCR 多少页；0 表示不限制。
+    pub max_pages: usize,
+    /// 页面文字少于该字符数时触发 OCR。
+    pub min_text_chars: usize,
+}
+
+impl Default for OcrConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+            pdfium: None,
+            dpi: 200,
+            max_pages: 100,
+            min_text_chars: 20,
+        }
+    }
+}
+
+impl OcrConfig {
+    pub fn resolve_dir(&self, base: &Path) -> PathBuf {
+        match &self.dir {
+            Some(dir) if dir.is_absolute() => dir.clone(),
+            Some(dir) => base.join(dir),
+            None => default_exe_dir().join("models").join("ocr"),
+        }
+    }
+
+    pub fn resolve_pdfium(&self, base: &Path) -> PathBuf {
+        match &self.pdfium {
+            Some(path) if path.is_absolute() => path.clone(),
+            Some(path) => base.join(path),
+            None => default_exe_dir().join("pdfium.dll"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -249,6 +310,9 @@ impl Config {
         if self.search.results == 0 {
             bail!("search.results 必须大于 0");
         }
+        if !(72..=600).contains(&self.ocr.dpi) {
+            bail!("ocr.dpi 必须在 72 和 600 之间");
+        }
         if self.model.batch_size == 0 {
             bail!("model.batch_size 必须大于 0");
         }
@@ -354,12 +418,15 @@ impl Config {
     }
 }
 
-fn default_model_dir(name: &str) -> PathBuf {
-    let exe_dir = std::env::current_exe()
+fn default_exe_dir() -> PathBuf {
+    std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
-    exe_dir.join("models").join(name)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn default_model_dir(name: &str) -> PathBuf {
+    default_exe_dir().join("models").join(name)
 }
 
 #[derive(Debug)]
@@ -708,6 +775,7 @@ impl ScopeRules {
             file_types: FileTypes::new(&IndexConfig {
                 dir: None,
                 extensions: file.index.extensions,
+                textless_pdf: true,
             }),
         })
     }
@@ -1060,6 +1128,7 @@ mod tests {
         let custom = FileTypes::new(&IndexConfig {
             dir: None,
             extensions: Some(vec![".TXT".into(), "md".into()]),
+            textless_pdf: true,
         });
         assert!(custom.is_indexable(Path::new("a.txt")));
         assert!(custom.is_indexable(Path::new("a.md")));
@@ -1198,6 +1267,34 @@ mod tests {
         assert!(bad.validate().is_err());
         bad = Config::default();
         bad.search.results = 0;
+        assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn ocr_defaults_and_validation() {
+        let cfg = Config::default();
+        assert!(cfg.index.textless_pdf);
+        assert!(cfg.ocr.enabled);
+        assert_eq!(cfg.ocr.dpi, 200);
+        assert_eq!(cfg.ocr.max_pages, 100);
+        assert_eq!(cfg.ocr.min_text_chars, 20);
+        assert!(cfg.validate().is_ok());
+
+        let cfg: Config = toml::from_str(
+            "[index]\ntextless_pdf = false\n\n[ocr]\nenabled = false\ndpi = 150\nmax_pages = 10\nmin_text_chars = 5\n",
+        )
+        .unwrap();
+        assert!(!cfg.index.textless_pdf);
+        assert!(!cfg.ocr.enabled);
+        assert_eq!(cfg.ocr.dpi, 150);
+        assert_eq!(cfg.ocr.max_pages, 10);
+        assert_eq!(cfg.ocr.min_text_chars, 5);
+
+        let mut bad = Config::default();
+        bad.ocr.dpi = 0;
+        assert!(bad.validate().is_err());
+        bad = Config::default();
+        bad.ocr.dpi = 601;
         assert!(bad.validate().is_err());
     }
 

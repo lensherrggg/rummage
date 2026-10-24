@@ -4,4 +4,6 @@
 /_work
 *.pdb
 /dist
+/logs
+/pdfium.dll
 /WORKLOG.local.md

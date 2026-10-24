@@ -1,4 +1,5 @@
 use crate::engine::{FileHit, IndexPhase, IndexStatus, ModelStatus};
+use crate::ocr::{self, OcrStatus};
 use crate::query::{self, ParsedQuery};
 use crate::worker::{IndexMsg, UiMsg};
 use anyhow::Result;
@@ -44,6 +45,7 @@ pub struct App {
     query_id: u64,
     awaiting: Option<u64>,
     max_results: usize,
+    ocr_status: OcrStatus,
     pub quit: bool,
 }
 
@@ -51,6 +53,33 @@ pub struct App {
 struct DetailView {
     hit: usize,
     scroll: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PageInfo {
+    current: usize,
+    pages: usize,
+}
+
+impl PageInfo {
+    fn label(self) -> String {
+        format!("页 {}/{}", self.current, self.pages)
+    }
+}
+
+/// 结果页按当前可见行数分页；`selected` 决定当前页。
+fn page_info(app: &App, max_hits: usize, visible: usize) -> Option<PageInfo> {
+    let total = app.hits.len().min(max_hits);
+    if total == 0 {
+        return None;
+    }
+    let visible = visible.max(1);
+    let pages = total.div_ceil(visible);
+    let selected = app.selected.min(total - 1);
+    Some(PageInfo {
+        current: selected / visible + 1,
+        pages,
+    })
 }
 
 impl App {
@@ -75,6 +104,7 @@ impl App {
             query_id: 0,
             awaiting: None,
             max_results: 10,
+            ocr_status: ocr::status(),
             quit: false,
         }
     }
@@ -113,6 +143,7 @@ impl App {
                 self.toast = None;
             }
         }
+        self.ocr_status = ocr::status();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> KeyOutcome {
@@ -308,11 +339,13 @@ fn run_loop(
                                 })
                                 .is_err()
                             {
+                                log::error!("索引线程已退出");
                                 app.set_toast("索引线程已退出");
                             }
                         }
                         KeyOutcome::Copy(path) => {
                             if let Err(err) = copy_path(&path) {
+                                log::warn!("{err}");
                                 app.set_toast(err);
                             }
                         }
@@ -370,13 +403,22 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_input(frame, app, chunks[0]);
 
     let results_area = if small { chunks[1] } else { chunks[2] };
+    let results_height = if !small && app.focus == Focus::Results {
+        results_area.height.saturating_sub(1)
+    } else {
+        results_area.height
+    };
+    let per_hit = if small { 1 } else { 2 };
+    let visible = ((results_height as usize) / per_hit).max(1);
+    let page = page_info(app, max_hits, visible);
+
     if !small && app.focus == Focus::Results {
         let parts =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(results_area);
-        draw_results(frame, app, parts[0], max_hits, small);
+        draw_results(frame, app, parts[0], max_hits, small, visible);
         draw_results_hint(frame, parts[1]);
     } else {
-        draw_results(frame, app, results_area, max_hits, small);
+        draw_results(frame, app, results_area, max_hits, small, visible);
     }
 
     if small {
@@ -387,7 +429,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         frame.render_widget(hint, chunks[2]);
     } else {
         draw_separator(frame, chunks[1]);
-        draw_status(frame, app, chunks[3]);
+        draw_status(frame, app, chunks[3], page);
     }
 
     if let Some(view) = &app.detail {
@@ -429,7 +471,14 @@ fn draw_separator(frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
 }
 
-fn draw_results(frame: &mut Frame, app: &App, area: Rect, max_hits: usize, small: bool) {
+fn draw_results(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    max_hits: usize,
+    small: bool,
+    visible: usize,
+) {
     let mut lines: Vec<Line> = Vec::new();
     if app.hits.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -439,8 +488,7 @@ fn draw_results(frame: &mut Frame, app: &App, area: Rect, max_hits: usize, small
     } else {
         let width = area.width.saturating_sub(2) as usize;
         let show_snippets = !small;
-        let per_hit = if show_snippets { 2 } else { 1 };
-        let visible = ((area.height as usize) / per_hit).max(1);
+        let visible = visible.max(1);
         let total = app.hits.len().min(max_hits);
         let selected = app.selected.min(total.saturating_sub(1));
         let offset = if total > visible {
@@ -729,7 +777,7 @@ fn snippet_spans(spans: &[(String, bool)], max_width: usize) -> Vec<Span<'static
     out
 }
 
-fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_status(frame: &mut Frame, app: &App, area: Rect, page: Option<PageInfo>) {
     let watching = if app.watching {
         "运行中"
     } else {
@@ -761,6 +809,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         "监控: {watching} | 索引: {} 文件{indexing} | 模型: {model}",
         app.status.indexed_files
     );
+    if app.ocr_status != OcrStatus::Disabled {
+        base.push_str(&format!(" | OCR: {}", app.ocr_status.label()));
+    }
     if app.status.rerank != ModelStatus::Disabled {
         let rerank = match &app.status.rerank {
             ModelStatus::Disabled => "已关闭",
@@ -770,7 +821,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         };
         base.push_str(&format!(" | 重排: {rerank}"));
     }
-    base.push_str(&format!(" | 焦点: {focus}"));
+    // 80 列窄屏且 OCR 已启用时，优先保留 OCR/翻页等新信息，焦点仍可从光标和结果区提示判断。
+    if app.ocr_status == OcrStatus::Disabled || area.width >= 90 {
+        base.push_str(&format!(" | 焦点: {focus}"));
+    }
+    if let Some(page) = page {
+        base.push_str(&format!(" | {}", page.label()));
+    }
 
     let mut spans = vec![Span::styled(base.clone(), Style::default().fg(Color::Gray))];
     let error = app
@@ -918,6 +975,23 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_shows_ocr_status_when_enabled() {
+        let mut app = app_with_hits(3);
+        app.ocr_status = OcrStatus::Ready;
+        let text = render(&app, 140, 30);
+        assert!(text.contains("OCR: 就绪"), "{text}");
+
+        // 80 列时优先保留 OCR 和页信息，焦点字段让位。
+        let narrow = render(&app, 80, 20);
+        assert!(narrow.contains("OCR: 就绪"), "{narrow}");
+        assert!(narrow.contains("页 1/1"), "{narrow}");
+
+        app.ocr_status = OcrStatus::Disabled;
+        let text = render(&app, 140, 30);
+        assert!(!text.contains("OCR:"), "{text}");
+    }
+
+    #[test]
     fn status_bar_shows_active_phase_percent() {
         let mut app = app_with_hits(1);
         app.status.indexing = true;
@@ -1051,6 +1125,21 @@ mod tests {
         let app = app_with_hits(2);
         let text = render(&app, 79, 19);
         assert!(!text.contains("相关摘录"), "{text}");
+    }
+
+    #[test]
+    fn status_bar_shows_current_and_total_pages() {
+        let mut app = app_with_hits(10);
+        let text = render(&app, 80, 20);
+        assert!(text.contains("页 1/2"), "{text}");
+
+        app.focus = Focus::Results;
+        app.selected = 8;
+        let text = render(&app, 80, 20);
+        assert!(text.contains("页 2/2"), "{text}");
+
+        let empty = app_with_hits(0);
+        assert!(!render(&empty, 80, 20).contains("页 "), "empty results should not show a page");
     }
 
     #[test]

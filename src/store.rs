@@ -155,6 +155,17 @@ impl Store {
         }
     }
 
+    /// Refresh only the stat metadata after a hash confirmed the content is
+    /// unchanged. This prevents a touched-but-identical file from being
+    /// re-read and re-hashed on every subsequent startup.
+    pub fn update_file_meta(&self, path: &str, mtime_ns: i64, size: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET mtime_ns = ?1, size = ?2 WHERE path = ?3",
+            params![mtime_ns, size, path],
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn upsert(
         &self,
@@ -257,6 +268,21 @@ mod tests {
         assert_eq!(store.count().unwrap(), 1);
         store.delete_by_id(id).unwrap();
         assert_eq!(store.count().unwrap(), 0);
+    }
+
+    #[test]
+    fn update_file_meta_refreshes_stat_only() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .upsert("D:\\a.md", "hash", 1, 10, "正文", 2, false)
+            .unwrap();
+        store.update_file_meta("D:\\a.md", 99, 42).unwrap();
+        let f = store.get_by_path("D:\\a.md").unwrap().unwrap();
+        assert_eq!(f.mtime_ns, 99);
+        assert_eq!(f.size, 42);
+        assert_eq!(f.hash, "hash");
+        assert_eq!(f.norm_text, "正文");
     }
 
     #[test]

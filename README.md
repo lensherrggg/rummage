@@ -49,13 +49,18 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "~$*"
 ```text
 D:\tools\rummage\
 ├── rummage.exe
+├── pdfium.dll              # 可选：扫描件 OCR 渲染
 └── models\
-    └── bge-small-zh-v1.5\
-        ├── model.onnx
-        ├── tokenizer.json
-        ├── config.json
-        ├── special_tokens_map.json
-        └── tokenizer_config.json
+    ├── bge-small-zh-v1.5\
+    │   ├── model.onnx
+    │   ├── tokenizer.json
+    │   ├── config.json
+    │   ├── special_tokens_map.json
+    │   └── tokenizer_config.json
+    └── ocr\                # 可选：扫描件 OCR 识别
+        ├── det.onnx
+        ├── rec.onnx
+        └── dict.txt
 ```
 
 模型文件来自 `Xenova/bge-small-zh-v1.5` 的 ONNX 导出，五个文件缺一不可。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录。
@@ -146,7 +151,7 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "20??_归档
 
 中途可以按 `Esc` 或 `Ctrl+C` 退出。退出时会先停止调度，不再开始新的文件或嵌入批次；正在计算的一小批完成后立即落盘并结束进程，已完成的索引会保存，下次启动从未完成的部分继续。把 `[model] batch_size` / `[rerank] batch_size` 调小可以让退出更快，但索引吞吐会下降。
 
-**启动后先确认状态栏四项**（终端至少 80×20）：
+**启动后先确认状态栏主要字段**（终端至少 80×20）：
 
 ```text
 查询: 
@@ -160,6 +165,8 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "20??_归档
 - `索引: N 文件` —— 已收录的文档数量；索引进行中会追加当前阶段与百分比，如 `· 扫描 67%`。`扫描` 期间查询要排队；`语义` / `重排` 期间可以正常检索
 - `模型: 就绪` —— 语义检索可用；若是 `未就绪(仅关键词)` 见[常见问题](#五常见问题)
 - `焦点: 查询` —— 键盘输入进入查询框
+- `页 1/2` —— 有结果时显示当前页/总页数；无结果时不显示
+- `OCR: 就绪` —— 启用扫描件 OCR 时显示；`待加载` 表示还没遇到需要 OCR 的页，`识别中` 表示正在跑模型，`未就绪` 看日志里的缺失原因
 
 输入一句话，按 `Enter` 检索；`Tab` 把焦点切到结果列表，`↓` 选择，`c` 复制路径。
 
@@ -222,7 +229,8 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 直接用同样的命令启动即可：
 
 - 未变化的文件按哈希跳过，不再解析、不再嵌入，启动只需数秒
-- 索引上次已落盘，模型与维度没变就原样复用
+- 索引上次已落盘，模型与维度没变就原样复用；启动扫描只对 mtime/size 变化的文件重新读取和哈希
+- 扫描完成时日志会记录文件数、变更数和耗时，便于判断是目录遍历还是首次 OCR 占用了时间
 - 上次退出前没嵌入完的文件会自动续跑；重排向量同样续跑（`重排: 加载中` → `就绪`）
 - 模型文件被移走或损坏时，自动降级为纯关键词检索，状态栏显示 `模型: 未就绪(仅关键词)`
 - 重排模型被移走或损坏时不影响基础检索，状态栏显示 `重排: 未就绪`，红字给出原因
@@ -249,7 +257,7 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 
 - 第一行：查询输入框，焦点在此时显示光标
 - 中间：结果列表，默认最多 10 条（由 `[search] results` 控制）；每条第一行是完整文件路径，第二行是**最佳匹配块**里的摘录，命中的词以黄色高亮，`>` 为当前选中项
-- 最后一行：状态栏；右侧偶尔出现红字提示（最近一次错误，4 秒后消失）
+- 最后一行：状态栏；有结果时显示 `页 1/2`（当前页/总页数），右侧偶尔出现红字提示（最近一次错误，4 秒后消失）
 - 焦点切到结果列表时，结果区底部出现提示行 `c 复制路径   j/k 选择   Enter 详情   Tab 返回查询`
 - 在结果列表按 `Enter` 会叠一层详情：显示完整路径、关键词/语义名次、融合分、重排分与名次变化，以及最佳匹配块的全文（命中词同样黄色高亮）；详情层内 `j`/`k` 滚动、`Esc` 关闭
 - 检索结果为空或尚未检索时：`输入查询后按 Enter 检索`
@@ -323,12 +331,14 @@ Esc 关闭   j/k 滚动
 | 索引 | `N 文件` + 阶段百分比 | 已收录文件数；索引进行中追加 `· 扫描 NN%` / `· 语义 NN%` / `· 重排 NN%`，空闲时不显示百分比。扫描阶段查询排队，语义/重排阶段可正常检索 |
 | 模型 | `加载中` / `就绪` / `未就绪(仅关键词)` / `已禁用` | 只有 `就绪` 时启用语义检索；其余情况退化为纯 BM25 |
 | 重排 | `加载中` / `就绪` / `未就绪` | 仅在 `[rerank] enabled = true` 时显示；`未就绪` 表示重排被跳过，基础检索不受影响 |
+| OCR | `待加载` / `加载中` / `就绪` / `识别中` / `未就绪` | 仅在 `[ocr] enabled = true` 且 `[index] textless_pdf = true` 时显示；首次遇到扫描件才加载模型，正在逐页识别时显示 `识别中`，缺文件时显示 `未就绪` |
 | 焦点 | `查询` / `结果` | 当前键盘焦点，决定字符输入还是 `c` 复制 |
+| 结果页 | `页 1/2` | 当前第几页 / 总页数；有结果时显示。每页条数按结果区可见高度自动计算，切换焦点或改变终端高度后重新分页；无结果时不显示 |
 
 启用重排且正在补索引时状态栏形如：
 
 ```text
-监控: 运行中 | 索引: 1434 文件 · 语义 32% | 模型: 就绪 | 重排: 就绪 | 焦点: 查询
+监控: 运行中 | 索引: 1434 文件 · 语义 32% | 模型: 就绪 | 重排: 就绪 | OCR: 就绪 | 焦点: 查询
 ```
 
 降级行为都可见、可恢复：模型文件修好后重启即恢复语义检索；重排模型不可用只影响前几名的微调，基础排序照常；监控失败时重启程序即可重试。
@@ -347,10 +357,19 @@ debounce_ms = 500                 # 文件事件防抖窗口（毫秒）
 [index]
 dir = "D:\\tools\\rummage\\index" # 省略则为第一个根目录下的 .rummage
 extensions = ["md", "markdown", "docx", "pdf", "ofd"] # 参与索引的扩展名，省略即默认值
+textless_pdf = true               # 是否处理无文字层 PDF；false = 直接跳过，不做 OCR
 
 [search]
 candidates = 50                   # 关键词/语义每路先取多少个分块候选（默认 50）
 results = 10                      # 最终最多显示多少个文件结果（默认 10；小终端最多 5）
+
+[ocr]
+enabled = true                    # 默认开启；模型/PDFium 缺失时自动降级
+dir = "D:\\tools\\rummage\\models\\ocr" # 省略则为 exe 同目录 models\ocr
+pdfium = "D:\\tools\\rummage\\pdfium.dll" # 省略则为 exe 同目录 pdfium.dll
+dpi = 200                         # 渲染 DPI；150～300 常用
+max_pages = 100                   # 单个 PDF 最多 OCR 页数；0 = 不限制
+min_text_chars = 20               # 页面文字少于该字符数才 OCR
 
 [include]
 # 可选白名单；留空即全部收录
@@ -399,6 +418,10 @@ max_length = 1024                 # 分词最大长度
 ```
 
 `[search]` 控制检索规模：`candidates` 是关键词、语义两路各自先取的**分块**候选数，聚合到文件后再截断到 `results` 条。两者都必须大于 0；省略时保持旧行为（50 / 10）。把 `results` 调大后，`Enter` 详情、`j`/`k` 选择和翻页照常工作，终端高度不够时仍按页滚动。
+
+`[ocr]` 控制扫描件 OCR：默认开启；缺少 `det.onnx` / `rec.onnx` / `dict.txt` 或 `pdfium.dll` 时只记录警告并降级为文字层提取，不会影响普通 PDF。OCR 只处理文字少于 `min_text_chars` 的页，单个 PDF 最多处理 `max_pages` 页；识别结果缓存在索引目录的 `ocr-cache\`，重建索引时可复用。`dpi` 越高越清晰但越慢，200 是推荐起点。
+
+`[index] textless_pdf` 是更上层的总开关：`false` 时完全不处理无文字层 PDF（不 OCR、也不进入索引）；`true` 时才允许 OCR 回退。若 OCR 也未启用、模型缺失或识别失败，仍然不会为无文字层 PDF 建空索引。想保留普通 PDF、完全跳过扫描件，设 `textless_pdf = false`；想保留扫描件 OCR、只是临时缺模型，保持 `true` 并看日志里的降级原因。
 
 `[rerank]` 用 EmbeddingGemma 2 对**基础排序的前 `top_n` 个文件**做混合重排：基础分与 Gemma 相似度各自归一化后按 `weight` 加权。第 `top_n + 1` 名及以后完全不动，所以它只影响“哪份文件排第一”，不会把弱相关文件拉进结果。
 
@@ -561,12 +584,60 @@ Remove-Item -Force D:\docs\.rummage\rerank.bin
 
 索引约占原文大小的一到数倍（取决于分块数量与向量维度）。删除 `.rummage` 不影响任何原始文档。
 
+### 4.3 错误日志
+
+TUI 会占用终端，错误不会打印到屏幕，而是追加到本地日志文件。程序按以下顺序选择第一个可写位置：
+
+1. `<exe 所在目录>\logs\rummage.log`（便携版通常是 `D:\tools\rummage-portable-0.1.0-full\logs\rummage.log`）
+2. `%LOCALAPPDATA%\rummage\logs\rummage.log`
+3. `%TEMP%\rummage-logs\rummage.log`
+
+日志内容：
+
+- 每次启动记录版本、配置文件、监控目录、索引目录、模型/重排开关
+- 运行中的错误和警告：索引/模型/重排失败、文件监控异常、单页 PDF 解析失败、PDF 解析器警告等
+- 格式示例：`2026-10-24T15:00:00Z [ERROR] PDF 第 12 页触发解析器 panic，已跳过`
+- 时间为 UTC；文件超过 5 MiB 时在下次启动轮转为 `rummage.log.1`，只保留一份旧日志
+- 不记录查询词和结果正文，只记录运行状态、错误与相关路径
+
+状态栏右侧的红字只是最近一次错误的提示，历史错误看日志文件。找不到日志时先看 exe 同目录的 `logs\`；如果该目录不可写，程序会自动落到 `%LOCALAPPDATA%` 或临时目录。
+
+### 4.4 扫描件 OCR
+
+没有文字层的 PDF 会按页回退到 OCR：PDFium 渲染页面，再用 RapidOCR/PP-OCRv4 ONNX 识别。检索仍走原来的 BM25 + bge 链路，OCR 文本只是作为页面的文字来源。
+
+需要的文件：
+
+```text
+D:\tools\rummage\
+├── pdfium.dll
+└── models\ocr\
+    ├── det.onnx            # PP-OCRv4 检测模型
+    ├── rec.onnx            # PP-OCRv4 识别模型
+    └── dict.txt            # ppocr_keys_v1.txt
+```
+
+- 默认开启；缺模型或 DLL 时自动降级为只处理文字层，并在日志里说明
+- 只 OCR 文字少于 `min_text_chars` 的页；混合型 PDF 不会整份重做
+- 单文件最多 OCR `max_pages` 页；超出的页跳过并记录日志
+- 识别结果缓存在索引目录的 `ocr-cache\`，按文件哈希 + 页码 + DPI + 模型大小命名；重建索引可复用
+- 首次遇到扫描件才加载模型，不拖慢普通文字层 PDF 的启动
+- OCR 模型和 `pdfium.dll` 都不联网、不写入原始文档目录
+- 目标内网机的 CPU 可能比开发机慢；建议先用少量扫描件测 `ocr.dpi = 200` 的实际耗时
+- 不需要 OCR 时把 `[ocr] enabled = false`，不会加载模型
+- 想完全跳过所有无文字层 PDF（连 OCR 尝试都不做），把 `[index] textless_pdf = false`；这比只关 `[ocr]` 更彻底
+
+OCR 模型和 PDFium 的许可证需随部署包一并保留：PDFium（BSD-3-Clause）、RapidOCR/PP-OCRv4（Apache-2.0）。模型文件不放进 git。
+
 ---
 
 ## 五、常见问题
 
 | 现象 | 原因与处理 |
 |---|---|
+| 程序报错，想查历史 / 完整原因 | 看 exe 同目录 `logs\rummage.log`；不可写时会落到 `%LOCALAPPDATA%\rummage\logs\` 或 `%TEMP%\rummage-logs\`，见 [4.3](#43-错误日志) |
+| 每次启动都扫描很久 | 启动仍会遍历目录，但已改为按 `mtime + size` 快速判断：未变的文件不再读取、不再算 blake3。若仍慢，看日志 `扫描完成：N 个文件，M 个变更，耗时 X`；首次启用 OCR 会 OCR 大量扫描件（可能几分钟），网络盘/杀软/同步盘改 mtime 也会导致反复重读 |
+| 文件内容改了但索引没变 | 快速路径依赖 `mtime + size`；如果工具修改内容却保留原时间戳和大小，需要删除索引或 touch 文件后重启 |
 | 启动即退出，提示 `未指定监控目录` | 既没给 `--dir`，配置里也没有 `[watch] roots`。补上其一 |
 | 提示 `监控目录不存在或不可访问` | `--dir` 路径写错，或网络盘未挂载 |
 | 提示配置文件不存在 / 解析失败 | `--config` 路径写错，或 TOML 语法错误（注意 Windows 路径要写双反斜杠） |
@@ -581,7 +652,10 @@ Remove-Item -Force D:\docs\.rummage\rerank.bin
 | 怎么重建 / 清理索引 | 关闭程序后删除索引目录再启动，见 [4.1](#41-重建索引) 与 [4.2](#42-清理索引)；默认是第一个根目录下的 `.rummage`，配置了 `[index] dir` 时删那个目录 |
 | 退出时还在索引，进程要等一会 | 退出会先停止调度，正在计算的一小批（`[model]` / `[rerank]` 的 `batch_size`）完成后落盘退出；调小 `batch_size` 可更快退出，但索引吞吐会下降 |
 | 能否索引 Word / PDF / OFD？ | `.docx`、带文字层的 `.pdf` 和 `.ofd` 默认就会索引；旧版 `.doc`、Excel、PPT 暂不支持。扫描件 PDF 和纯图片 OFD 需要先做 OCR 转成文字，本程序不内置 OCR |
-| 扫描版 PDF / 纯图片 OFD 搜不到 | 设计如此：没有文字层就跳过，不建空索引。先用 OCR 工具生成文字版文档，或转成 Markdown |
+| 扫描版 PDF / 纯图片 OFD 搜不到 | 先确认 `[index] textless_pdf = true`、`[ocr] enabled = true`，且 `pdfium.dll`、`models\ocr\det.onnx` / `rec.onnx` / `dict.txt` 齐全；缺文件时日志会写明原因。OFD 目前仍只支持有文字层。也可以用外部 OCR 工具生成文字版 PDF |
+| 完全不想处理扫描件 | 在 `[index]` 设 `textless_pdf = false`，无文字层 PDF 会直接跳过，不 OCR、不进入索引 |
+| 扫描件 OCR 太慢 | 降低 `ocr.dpi`（150 通常够用）、调小 `ocr.max_pages`，或只对必要目录开启 OCR；首次加载模型也会多几秒 |
+| OCR 结果有错字 / 表格串行 | 扫描件质量、倾斜、手写都会影响；可提高 DPI 或先用外部 OCR 生成可搜索 PDF。OCR 文本只用于检索，原文不会被修改 |
 | PDF 文字顺序乱 / 表格串行 | PDF 只存绘制指令，文字顺序取决于生成器；对排版要求高时优先用 docx 或转成 Markdown |
 | 个别 PDF 少了几页文字 | 单页解析失败会被跳过，其余页照常入库；状态栏只在整份 PDF 一页都取不到文字时报错 |
 | OFD 页序不对 | 程序按 `Document.xml` 的 `BaseLoc` 顺序读页，不按 `Page_N` 文件名排序；若仍不对，是生成工具写错了页序 |
@@ -614,6 +688,8 @@ Remove-Item -Force D:\docs\.rummage\rerank.bin
 
 ## 七、从源码构建与测试
 
+架构、索引流程、OCR、线程模型和设计取舍见 [DESIGN.md](DESIGN.md)。
+
 环境：Windows 11 x64、Rust 1.87+（MSVC 工具链，本机以 Visual Studio 2022 验证）。
 
 ```powershell
@@ -623,7 +699,7 @@ cargo build --release
 产物为 `target\release\rummage.exe`。注意它默认在自身同目录找模型，见 1.1。
 
 ```powershell
-cargo test                              # 123 个单元测试 + 2 个监控集成测试，不需要模型
+cargo test                              # 130 个单元测试 + 2 个监控集成测试，不需要模型
 cargo test --test e2e_model -- --ignored # 真实 ONNX 模型端到端（需 models\ 下的文件）
 cargo clippy --all-targets
 ```
@@ -645,6 +721,9 @@ cargo clippy --all-targets
 - 三份实测 PDF（`UniGB-UCS2-H` / `GBK-EUC-H` 编码、含损坏内容流）均能提取中文正文：原报错的文件分别得到 1.1 万、57 万、0.5 万字，过程中无 panic 输出；单页损坏时其余页照常保留
 - 594 页机考题库 PDF（含 5 个异常路径操作符页面）：修复后逐页提取 0 次 panic，原先被跳过的 5 页恢复出 426/249/249/224/434 字正文；全文 468851 字（修复前 467951）
 - 109 份高风险 PDF（异常 CMap/编码/损坏内容流）回归：106 份正常提取，3 条错误来自 2 个文件（文件级 xref/trailer 损坏，非 panic，需专门的修复解析），逐页 panic 为 0
+- 扫描件 OCR（release，3 页真实党委会纪要）：首次加载模型后约 15～23 秒完成索引，得到 1511 字，SQLite `norm_text` 可命中“党委会”“俞越中”
+- 错误日志：用不存在的 `--config` 启动，exe 同目录 `logs\rummage.log` 生成 `[ERROR] 程序异常退出：配置文件不存在…`；正常启动会记录版本、配置/监控/索引目录与模型开关
+- 启动扫描快速路径：50 个 Markdown 首次索引 1.29 秒；第二次启动日志为 `50 个文件，0 个变更，耗时 0.02s`，未变文件不再读取/哈希
 - 索引进行中按 `Esc` 可及时退出，不阻塞在扫描上
 - 语义索引进行中按 `Esc`（250 份文档、真实 bge）：停止信号发出后约 0.3 秒进程退出，不会等整批文件算完
 - `--ignore` + `[search] results`（真实 PTY，含 `skipdir` 与 `~$temp.md`）：被忽略的目录/文件不进入 SQLite，查询只显示配置的 3 条结果
@@ -655,6 +734,8 @@ cargo clippy --all-targets
 ```text
 src/
 ├── main.rs        CLI 入口、装配监控/索引/TUI、退出清理
+├── logging.rs     本地错误日志：位置选择、UTC 时间戳、5 MiB 轮转
+├── ocr.rs         扫描件 OCR：PDFium 渲染 + RapidOCR/PP-OCRv4 ONNX + 页级缓存
 ├── config.rs      配置、路径解析、收录白名单、忽略规则、文件类型、目录局部规则
 ├── extract.rs     docx / pdf / ofd / 纯文本提取
 ├── normalize.rs   12 条 OCR 归一化规则
@@ -687,4 +768,5 @@ tests/               模型端到端、监控集成测试
 - **docx / pdf / ofd 直接索引**：需求之外的格式扩展。docx 解包正文 XML 取文字；pdf 只读文字层；ofd 按国标容器读取页面 `TextCode`，页序以 `Document.xml` 为准。无文字层（扫描件、纯图片页）按“不用管”直接跳过，不引入 OCR，也不依赖外部程序或 DLL。
 - **PDF 中文字体编码**：内置解析器原本只认 `Identity-H`，遇到 `UniGB-UCS2-H` / `GBK-EUC-H` 会直接 panic。现用仓库内 vendored 版本补上这几类预定义 CMap 的直接解码，并把逐份提取改为逐页提取：损坏页计入跳过，其余页文字保留，解析器 panic 不再打印到终端。
 - **PDF 解析健壮性**：继续收口 vendored 解析器的 panic 分支：未知 simple-font `/Encoding` 回退到默认表、`Differences` 越界跳过、缺 `MediaBox` 用 Letter 尺寸、路径操作符缺操作数时忽略而不是 abort、`Tf`/`gs`/`Do` 引用缺失对象时跳过、损坏 UTF-16 不 panic、颜色空间与函数解析异常降级。594 页实测文件由 5 页 panic 降为 0；109 份高风险样本逐页 panic 为 0。
+- **扫描件 OCR**：需求之外增加页级 OCR 回退：PDFium 渲染 + RapidOCR/PP-OCRv4 ONNX，只处理缺少文字层的页，结果缓存到索引目录；模型或 DLL 缺失时自动降级，不影响普通 PDF。默认开启，可用 `[ocr] enabled = false` 关闭。
 - **可选二次重排**：需求之外的排序增强。用 EmbeddingGemma 2 对基础排序前 5 名做混合重排，默认关闭；通过 `[rerank]` 打开，关闭时零开销。它不替代主检索链路，模型不可用时只降级重排本身。

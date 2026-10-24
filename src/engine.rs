@@ -5,7 +5,7 @@ use crate::normalize::{normalize, normalize_query};
 use crate::persist;
 use crate::query::ParsedQuery;
 use crate::rerank::{self, GemmaEmbedder, RerankStore};
-use crate::store::Store;
+use crate::store::{Store, StoredFile};
 use crate::tokenize;
 use anyhow::Result;
 use scour::{chunk_text_with_overlap, rrf_fuse_scored, HybridIndex};
@@ -414,7 +414,9 @@ impl IndexEngine {
     }
 
     pub fn note_error(&mut self, message: impl Into<String>) {
-        self.last_error = Some(message.into());
+        let message = message.into();
+        log::error!("{message}");
+        self.last_error = Some(message);
     }
 
     pub fn has_pending_embeddings(&self) -> bool {
@@ -441,10 +443,12 @@ impl IndexEngine {
         mut progress: impl FnMut(&IndexStatus),
         mut should_stop: impl FnMut() -> bool,
     ) -> Result<()> {
+        let started = Instant::now();
         let paths = self.collect_paths();
         let total = paths.len();
         let mut seen: HashSet<String> = HashSet::with_capacity(total);
         let mut processed = 0usize;
+        let mut changed = 0usize;
         let mut last_emit = Instant::now();
         if total > 0 {
             self.scan_progress = Some(IndexProgress {
@@ -462,7 +466,8 @@ impl IndexEngine {
             }
             seen.insert(path_key(path));
             match self.upsert_file_from_disk(path) {
-                Ok(_) => {}
+                Ok(true) => changed += 1,
+                Ok(false) => {}
                 Err(err) => self.note_error(format!("读取 {} 失败：{err}", path.display())),
             }
             processed += 1;
@@ -497,6 +502,10 @@ impl IndexEngine {
 
         self.scan_progress = None;
         self.persist()?;
+        log::info!(
+            "扫描完成：{total} 个文件，{changed} 个变更，耗时 {:.2}s",
+            started.elapsed().as_secs_f64()
+        );
         progress(&self.status(false));
         Ok(())
     }
@@ -1069,26 +1078,33 @@ impl IndexEngine {
         if !meta.is_file() {
             return Ok(false);
         }
-        let bytes = std::fs::read(path)?;
-        let hash = blake3::hash(&bytes).to_hex().to_string();
         let path_str = simplify_path(path).to_string_lossy().into_owned();
+        let mtime_ns = system_time_ns(meta.modified().ok());
+        let size = meta.len() as i64;
 
-        if let Some(old) = self.store.get_by_path(&path_str)? {
-            if old.hash == hash {
-                if !old.embedded && old.chunks > 0 && self.model.is_some() {
-                    self.add_pending(old.id);
-                }
-                if old.chunks > 0
-                    && self.rerank_model.is_some()
-                    && !self.rerank.is_complete(old.id, old.chunks)
-                {
-                    self.add_rerank_pending(old.id);
-                }
+        // Fast path: unchanged mtime + size means we do not need to read or
+        // hash the file at all. This is what keeps a warm startup from
+        // re-reading every large PDF/OFD just to discover nothing changed.
+        let old = self.store.get_by_path(&path_str)?;
+        if let Some(old) = &old {
+            if old.mtime_ns == mtime_ns && old.size == size {
+                self.queue_missing_work(old);
                 return Ok(false);
             }
         }
 
-        let mtime_ns = system_time_ns(meta.modified().ok());
+        let bytes = std::fs::read(path)?;
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+
+        if let Some(old) = &old {
+            if old.hash == hash {
+                if old.mtime_ns != mtime_ns || old.size != size {
+                    self.store.update_file_meta(&path_str, mtime_ns, size)?;
+                }
+                self.queue_missing_work(old);
+                return Ok(false);
+            }
+        }
         let Some(text) = extract_text(path, &bytes)? else {
             // No text layer (e.g. a scanned PDF): keep it out of the index
             // rather than storing an empty document.
@@ -1099,8 +1115,20 @@ impl IndexEngine {
             return Ok(false);
         };
         let norm = normalize(&text, &self.cfg.normalize);
-        self.index_file_lexical(&path_str, &hash, mtime_ns, meta.len() as i64, &norm)?;
+        self.index_file_lexical(&path_str, &hash, mtime_ns, size, &norm)?;
         Ok(true)
+    }
+
+    fn queue_missing_work(&mut self, old: &StoredFile) {
+        if !old.embedded && old.chunks > 0 && self.model.is_some() {
+            self.add_pending(old.id);
+        }
+        if old.chunks > 0
+            && self.rerank_model.is_some()
+            && !self.rerank.is_complete(old.id, old.chunks)
+        {
+            self.add_rerank_pending(old.id);
+        }
     }
 
     fn index_file_lexical(

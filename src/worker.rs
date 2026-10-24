@@ -99,6 +99,7 @@ fn run(
     let mut engine = match IndexEngine::new(cfg, roots, index_dir, model_dir, rerank_dir) {
         Ok(engine) => engine,
         Err(err) => {
+            log::error!("初始化索引失败：{err}");
             let _ = ui_tx.send(UiMsg::Error(format!("初始化索引失败：{err}")));
             let _ = ui_tx.send(UiMsg::Status(IndexStatus {
                 model: ModelStatus::Unavailable {
@@ -116,7 +117,11 @@ fn run(
         }
     };
 
-    let _ = ui_tx.send(UiMsg::Status(engine.status(true)));
+    let initial_status = engine.status(true);
+    if let Some(err) = &initial_status.last_error {
+        log::error!("{err}");
+    }
+    let _ = ui_tx.send(UiMsg::Status(initial_status));
 
     if let Err(err) = engine.scan_lexical_cancellable(
         |status| {
