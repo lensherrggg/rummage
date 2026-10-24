@@ -66,6 +66,32 @@ D:\tools\rummage\
 
 模型文件来自 `Xenova/bge-small-zh-v1.5` 的 ONNX 导出，五个文件缺一不可。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录。
 
+### 显式下载模型
+
+程序运行时不会自动联网。需要补齐模型时，在联网机器上显式执行：
+
+```powershell
+# 下载 bge + OCR 到 exe 同目录 models
+rummage.exe models download
+
+# 只下 OCR
+rummage.exe models download --only ocr
+
+# 指定模型根目录（下面会有 bge-small-zh-v1.5\ 和 ocr\）
+rummage.exe models download --dir E:\rummage-models
+
+# 国内网络可换镜像
+rummage.exe models download --hf-base https://hf-mirror.com
+```
+
+- 默认下载 bge-small-zh-v1.5 的 5 个文件和 PP-OCRv4 的 `det.onnx` / `rec.onnx` / `dict.txt`
+- 已存在且大小合理的文件会跳过；`--force` 强制重下
+- `--only bge` / `--only ocr` / `--only all`
+- **不会**自动下载 PDFium、EmbeddingGemma 重排模型
+- 下载完成后把整个 `models\` 拷到离线机即可；离线机不需要运行这个命令
+
+目标机完全离线时，不要使用该命令，直接复制已下载的 `models\`。
+
 把 exe 和模型拷过去（以从源码构建为例）：
 
 ```powershell
@@ -743,7 +769,7 @@ cargo build --release
 产物为 `target\release\rummage.exe`。注意它默认在自身同目录找模型，见 1.1。
 
 ```powershell
-cargo test                              # 137 个单元测试 + 2 个监控集成测试，不需要模型
+cargo test                              # 138 个单元测试 + 2 个监控集成测试，不需要模型
 cargo test --test e2e_model -- --ignored # 真实 ONNX 模型端到端（需 models\ 下的文件）
 cargo clippy --all-targets
 ```

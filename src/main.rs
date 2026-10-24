@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use clap::Parser;
+use anyhow::{bail, Context, Result};
+use clap::{Args, Parser, Subcommand};
 use rummage::config::{Config, ScopeRules};
 use rummage::{logging, ocr, tui, watcher, worker};
 use std::path::{Path, PathBuf};
@@ -24,6 +24,51 @@ struct Cli {
     /// 额外忽略的目录/文件名模式，可重复；等价于同时写进 [ignore] dirs 和 names
     #[arg(long = "ignore", value_name = "PATTERN")]
     ignore: Vec<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// 显式下载运行所需的模型文件
+    Models {
+        #[command(subcommand)]
+        action: ModelsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelsCommand {
+    /// 下载 bge 嵌入模型和/或 OCR 模型到 models 目录
+    Download(DownloadArgs),
+}
+
+#[derive(Debug, Args)]
+struct DownloadArgs {
+    /// 模型根目录（包含 bge-small-zh-v1.5 和 ocr 两个子目录）；默认 exe 同目录 models
+    #[arg(long = "dir", value_name = "DIR")]
+    dir: Option<PathBuf>,
+
+    /// 只下载 bge / ocr；可逗号分隔，默认 all
+    #[arg(long = "only", default_value = "all", value_name = "LIST")]
+    only: String,
+
+    /// 已存在也重新下载
+    #[arg(long)]
+    force: bool,
+
+    /// 模型下载源；国内可用 https://hf-mirror.com
+    #[arg(long = "hf-base", default_value = "https://huggingface.co", value_name = "URL")]
+    hf_base: String,
+
+    /// OCR 字典源；默认使用 jsDelivr 上的 PaddleOCR 文本
+    #[arg(
+        long = "dict-url",
+        default_value = "https://fastly.jsdelivr.net/gh/PaddlePaddle/PaddleOCR@main/ppocr/utils/ppocr_keys_v1.txt",
+        value_name = "URL"
+    )]
+    dict_url: String,
 }
 
 fn main() -> Result<()> {
@@ -40,6 +85,9 @@ fn main() -> Result<()> {
 
 fn run(log_path: Option<&Path>) -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Models { action }) = &cli.command {
+        return run_models(action);
+    }
     let loaded = Config::load(cli.config.as_deref())?;
     let mut cfg = loaded.config;
     cfg.apply_cli_ignores(&cli.ignore);
@@ -118,4 +166,183 @@ fn run(log_path: Option<&Path>) -> Result<()> {
     log::info!("退出");
 
     tui_result
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DownloadFile {
+    remote: &'static str,
+    local: &'static str,
+    min_bytes: u64,
+}
+
+fn run_models(action: &ModelsCommand) -> Result<()> {
+    match action {
+        ModelsCommand::Download(args) => download_models(args),
+    }
+}
+
+fn download_models(args: &DownloadArgs) -> Result<()> {
+    let only = parse_only(&args.only)?;
+    let base = args
+        .dir
+        .clone()
+        .unwrap_or_else(|| models_dir().unwrap_or_else(|_| PathBuf::from("models")));
+    let bge_dir = base.join("bge-small-zh-v1.5");
+    let ocr_dir = base.join("ocr");
+
+    println!("模型目录：{}", base.display());
+    if only.0 {
+        println!("下载 bge-small-zh-v1.5 → {}", bge_dir.display());
+        let files = [
+            DownloadFile {
+                remote: "config.json",
+                local: "config.json",
+                min_bytes: 100,
+            },
+            DownloadFile {
+                remote: "onnx/model.onnx",
+                local: "model.onnx",
+                min_bytes: 50 * 1024 * 1024,
+            },
+            DownloadFile {
+                remote: "special_tokens_map.json",
+                local: "special_tokens_map.json",
+                min_bytes: 10,
+            },
+            DownloadFile {
+                remote: "tokenizer.json",
+                local: "tokenizer.json",
+                min_bytes: 100_000,
+            },
+            DownloadFile {
+                remote: "tokenizer_config.json",
+                local: "tokenizer_config.json",
+                min_bytes: 100,
+            },
+        ];
+        for file in &files {
+            let url = format!(
+                "{}/Xenova/bge-small-zh-v1.5/resolve/main/{}",
+                args.hf_base.trim_end_matches('/'),
+                file.remote
+            );
+            download_file(&url, &bge_dir, file, args.force)?;
+        }
+    }
+    if only.1 {
+        println!("下载 PP-OCRv4 → {}", ocr_dir.display());
+        let files = [
+            DownloadFile {
+                remote: "PP-OCRv4/ch_PP-OCRv4_det_infer.onnx",
+                local: "det.onnx",
+                min_bytes: 1_000_000,
+            },
+            DownloadFile {
+                remote: "PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx",
+                local: "rec.onnx",
+                min_bytes: 2_000_000,
+            },
+        ];
+        for file in &files {
+            let url = format!("{}/SWHL/RapidOCR/resolve/main/{}", args.hf_base.trim_end_matches('/'), file.remote);
+            download_file(&url, &ocr_dir, file, args.force)?;
+        }
+        let dict = DownloadFile {
+            remote: "",
+            local: "dict.txt",
+            min_bytes: 1_000,
+        };
+        download_file(&args.dict_url, &ocr_dir, &dict, args.force)?;
+    }
+
+    println!("完成。若下载源较慢，可用 --hf-base https://hf-mirror.com 重试。");
+    Ok(())
+}
+
+/// (bge, ocr)
+fn parse_only(value: &str) -> Result<(bool, bool)> {
+    let mut bge = false;
+    let mut ocr = false;
+    for part in value.split(',') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "all" => {
+                bge = true;
+                ocr = true;
+            }
+            "bge" | "embedding" | "semantic" => bge = true,
+            "ocr" => ocr = true,
+            other => bail!("--only 只支持 bge / ocr / all，收到：{other}"),
+        }
+    }
+    if !bge && !ocr {
+        bail!("--only 至少要包含 bge 或 ocr");
+    }
+    Ok((bge, ocr))
+}
+
+fn models_dir() -> Result<PathBuf> {
+    Ok(std::env::current_exe()?
+        .parent()
+        .context("无法定位 exe 目录")?
+        .join("models"))
+}
+
+fn download_file(url: &str, dir: &Path, file: &DownloadFile, force: bool) -> Result<()> {
+    let dest = dir.join(file.local);
+    if !force {
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            if meta.len() >= file.min_bytes {
+                println!("  已存在，跳过：{}", dest.display());
+                return Ok(());
+            }
+        }
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("创建模型目录失败：{}", dir.display()))?;
+    println!("  下载：{url}");
+    let mut response = ureq::get(url)
+        .call()
+        .with_context(|| format!("请求失败：{url}"))?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(256 * 1024 * 1024)
+        .read_to_vec()
+        .with_context(|| format!("读取响应失败：{url}"))?;
+    if (bytes.len() as u64) < file.min_bytes {
+        bail!(
+            "下载内容过小：{}（{} 字节，至少需要 {}）",
+            url,
+            bytes.len(),
+            file.min_bytes
+        );
+    }
+    let part = dest.with_extension("part");
+    std::fs::write(&part, &bytes)
+        .with_context(|| format!("写入临时文件失败：{}", part.display()))?;
+    if dest.exists() {
+        std::fs::remove_file(&dest)
+            .with_context(|| format!("删除旧文件失败：{}", dest.display()))?;
+    }
+    std::fs::rename(&part, &dest)
+        .with_context(|| format!("重命名失败：{}", dest.display()))?;
+    println!("  完成：{}（{} 字节）", dest.display(), bytes.len());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_parser_accepts_aliases_and_rejects_empty() {
+        assert_eq!(parse_only("all").unwrap(), (true, true));
+        assert_eq!(parse_only("bge").unwrap(), (true, false));
+        assert_eq!(parse_only("ocr").unwrap(), (false, true));
+        assert_eq!(parse_only("bge,ocr").unwrap(), (true, true));
+        assert_eq!(parse_only("semantic").unwrap(), (true, false));
+        assert!(parse_only("").is_err());
+        assert!(parse_only("docx").is_err());
+    }
 }

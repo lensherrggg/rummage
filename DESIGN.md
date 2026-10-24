@@ -13,6 +13,7 @@ Rummage 是一个 Windows 本地文档混合检索 TUI：
 - 索引可持久化，第二次启动只处理变化
 - 便携部署：exe + 模型 + DLL 可整体复制
 - 目标环境可能存在无法安装的组件（例如没有 Windows OCR 语言包），所以 OCR 必须自带依赖或可降级
+- 模型由联网机器显式下载/拷贝，运行期不访问网络；`models download` 只是部署辅助命令
 
 ## 2. 总体架构
 
@@ -52,7 +53,7 @@ Rummage 是一个 Windows 本地文档混合检索 TUI：
 
 | 模块 | 职责 |
 |---|---|
-| `src/main.rs` | CLI、装配 worker/watcher/TUI、日志与 OCR 配置初始化 |
+| `src/main.rs` | CLI（含显式 `models download`）、装配 worker/watcher/TUI、日志与 OCR 配置初始化 |
 | `src/config.rs` | TOML 配置、路径解析、忽略/白名单、局部规则、尺寸校验 |
 | `src/engine.rs` | 目录扫描、增量更新、文本索引、BM25+向量检索、RRF、rerank、快照协调 |
 | `src/extract.rs` | docx/pdf/ofd/纯文本提取；PDF 逐页 `catch_unwind`；无文字层页 OCR 回退 |
@@ -264,7 +265,7 @@ D:\tools\rummage-portable-0.1.0-full\
 
 ## 12. 验证与性能基线
 
-- 单元测试：137 个（`cargo test --offline`）
+- 单元测试：138 个（`cargo test --offline`）
 - 监控集成测试：2 个
 - PDF 加固：594 页机考 PDF 由 5 页 panic 降为 0；109 份高风险样本逐页 0 panic（3 条文件级 xref/trailer 损坏仍需专门修复）
 - OCR 选型：合成 11 页 + 真实 8 页；RapidOCR 准确率最高，Tesseract 次之，Windows OCR 快但表格顺序差且目标机可能无语言包
