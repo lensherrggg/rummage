@@ -49,6 +49,7 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "~$*"
 ```text
 D:\tools\rummage\
 ├── rummage.exe
+├── rummage-eval.exe        # 可选：离线检索质量评估
 ├── pdfium.dll              # 可选：扫描件 OCR 渲染
 └── models\
     ├── bge-small-zh-v1.5\
@@ -189,6 +190,10 @@ extensions = ["md", "markdown", "docx", "pdf", "ofd"]
 # 可选：每路分块候选数与最终结果条数；省略时默认 50 / 10
 candidates = 50
 results = 10
+# 高级 RRF 参数；一般不用改，评估时用 rummage-eval 覆盖
+# rrf_k = 60.0
+# lexical_weight = 1.0
+# semantic_weight = 1.0
 
 [include]
 # 可选白名单：只收录这些文件；留空或删除本节即全部收录
@@ -719,6 +724,8 @@ cargo build --release --no-default-features
 
 架构、索引流程、OCR、线程模型和设计取舍见 [DESIGN.md](DESIGN.md)。
 
+检索质量评测（Recall / MRR / nDCG / 三路基线）见 [EVAL.md](EVAL.md)，示例查询集在 `eval/queries.example.jsonl`。
+
 环境：Windows 11 x64、Rust 1.87+（MSVC 工具链，本机以 Visual Studio 2022 验证）。
 
 ```powershell
@@ -728,7 +735,7 @@ cargo build --release
 产物为 `target\release\rummage.exe`。注意它默认在自身同目录找模型，见 1.1。
 
 ```powershell
-cargo test                              # 130 个单元测试 + 2 个监控集成测试，不需要模型
+cargo test                              # 135 个单元测试 + 2 个监控集成测试，不需要模型
 cargo test --test e2e_model -- --ignored # 真实 ONNX 模型端到端（需 models\ 下的文件）
 cargo clippy --all-targets
 ```

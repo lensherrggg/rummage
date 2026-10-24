@@ -143,7 +143,7 @@ OCR 管线（`src/ocr.rs`）：
 → normalize + jieba 分词 + 中文停用词
 → 关键词 BM25 取 Top N
 → 语义 bge 取 Top N
-→ RRF（k=60）融合
+→ 加权 RRF 融合（默认 k=60，两路等权；可配置）
 → 按文件取最高分、去重
 → 截断到 [search] results
 → 可选 Gemma 对前 [rerank] top_n 名重排
@@ -199,6 +199,9 @@ textless_pdf = true
 [search]
 candidates = 50
 results = 10
+rrf_k = 60.0
+lexical_weight = 1.0
+semantic_weight = 1.0
 
 [ocr]
 enabled = true
@@ -226,6 +229,7 @@ weight = 0.5
 ```text
 D:\tools\rummage-portable-0.1.0-full\
 ├── rummage.exe
+├── rummage-eval.exe
 ├── pdfium.dll
 ├── models\
 │   ├── bge-small-zh-v1.5\
@@ -245,9 +249,18 @@ D:\tools\rummage-portable-0.1.0-full\
 
 更新部署时只替换 `rummage.exe`、`README.md`、`pdfium.dll` 和 `models\ocr\`；不要覆盖 `rummage.toml`、`docs\`、`index\`、已有 bge/Gemma 模型。
 
-## 11. 验证与性能基线
+## 11. 评测工具与质量基线
 
-- 单元测试：130 个（`cargo test --offline`）
+- `rummage-eval`：读取 JSONL 标注查询，输出 `lexical` / `semantic` / `hybrid` 三路的 Recall@K、MRR@K、nDCG@K、Success@K，并保留逐查询 Top K 与首个相关排名
+- `SearchMode` 让评估绕过 TUI，直接跑单路或融合
+- `[search] rrf_k` / `lexical_weight` / `semantic_weight` 可覆盖，用于扫参
+- 默认关闭 rerank，避免单路基线被二次重排干扰；`--rerank` 可测完整链路
+- 三路同时运行时输出融合税：混合首个相关排名劣于较好单路的查询数 / 至少一路命中的查询数
+- 标注格式与流程见 [EVAL.md](EVAL.md)
+
+## 12. 验证与性能基线
+
+- 单元测试：135 个（`cargo test --offline`）
 - 监控集成测试：2 个
 - PDF 加固：594 页机考 PDF 由 5 页 panic 降为 0；109 份高风险样本逐页 0 panic（3 条文件级 xref/trailer 损坏仍需专门修复）
 - OCR 选型：合成 11 页 + 真实 8 页；RapidOCR 准确率最高，Tesseract 次之，Windows OCR 快但表格顺序差且目标机可能无语言包
@@ -255,7 +268,7 @@ D:\tools\rummage-portable-0.1.0-full\
 - OCR：3 页真实扫描件 release 约 15～23 秒（含首次加载）；224 页扫描件按 100 页上限约数分钟
 - DirectML OCR（AMD Radeon 780M，7 页真实扫描件，含首次加载）：`auto`（DirectML）13.9s，`cpu` 31.3s，约 2.2 倍；两者 OCR 文本均为 3596 字
 
-## 12. 已知限制 / 后续方向
+## 13. 已知限制 / 后续方向
 
 1. 3 个 xref/trailer 损坏的 PDF 仍无法加载；需要外部扫描 `N 0 obj` 重建 xref 的修复解析
 2. `max_pages` 截断后，已索引文件不会自动补剩余页；需要重新建该文件/索引
@@ -266,7 +279,7 @@ D:\tools\rummage-portable-0.1.0-full\
 7. 目标内网机 CPU 可能较慢，OCR 耗时需在目标机重测
 8. DirectML 依赖 Windows 的 `DirectML.dll` 和可用 DX12 GPU；没有时自动回退 CPU。不同 GPU/驱动的收益差异很大，不能按本机 2.2 倍外推
 
-## 13. 关键设计取舍
+## 14. 关键设计取舍
 
 - **文件级结果**：检索结果定位到文件，详情层展示最佳块；不引入段落级结果列表
 - **页级 OCR 回退**：只 OCR 缺字页，避免整份重做；代价是版面/表格顺序仍由 OCR 决定

@@ -1,6 +1,7 @@
 pub mod config;
 pub mod embed;
 pub mod engine;
+pub mod eval;
 pub mod extract;
 pub mod logging;
 pub mod normalize;

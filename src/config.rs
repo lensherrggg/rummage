@@ -90,6 +90,12 @@ pub struct SearchConfig {
     pub candidates: usize,
     /// 最终返回、在结果列表里显示的文件数上限。
     pub results: usize,
+    /// RRF 的 rank constant。调大可降低头部排名的权重。
+    pub rrf_k: f64,
+    /// RRF 中关键词一路的权重。
+    pub lexical_weight: f64,
+    /// RRF 中语义一路的权重。
+    pub semantic_weight: f64,
 }
 
 impl Default for SearchConfig {
@@ -97,6 +103,9 @@ impl Default for SearchConfig {
         Self {
             candidates: 50,
             results: 10,
+            rrf_k: 60.0,
+            lexical_weight: 1.0,
+            semantic_weight: 1.0,
         }
     }
 }
@@ -322,6 +331,18 @@ impl Config {
         }
         if self.search.results == 0 {
             bail!("search.results 必须大于 0");
+        }
+        if !self.search.rrf_k.is_finite() || self.search.rrf_k <= 0.0 {
+            bail!("search.rrf_k 必须是大于 0 的有限数");
+        }
+        if !self.search.lexical_weight.is_finite() || self.search.lexical_weight < 0.0 {
+            bail!("search.lexical_weight 必须是非负有限数");
+        }
+        if !self.search.semantic_weight.is_finite() || self.search.semantic_weight < 0.0 {
+            bail!("search.semantic_weight 必须是非负有限数");
+        }
+        if self.search.lexical_weight == 0.0 && self.search.semantic_weight == 0.0 {
+            bail!("search.lexical_weight 和 search.semantic_weight 不能同时为 0");
         }
         if !(72..=600).contains(&self.ocr.dpi) {
             bail!("ocr.dpi 必须在 72 和 600 之间");
@@ -1267,12 +1288,20 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.search.candidates, 50);
         assert_eq!(cfg.search.results, 10);
+        assert_eq!(cfg.search.rrf_k, 60.0);
+        assert_eq!(cfg.search.lexical_weight, 1.0);
+        assert_eq!(cfg.search.semantic_weight, 1.0);
         assert!(cfg.validate().is_ok());
 
-        let cfg: Config =
-            toml::from_str("[search]\ncandidates = 20\nresults = 3\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[search]\ncandidates = 20\nresults = 3\nrrf_k = 10.0\nlexical_weight = 2.0\nsemantic_weight = 0.5\n",
+        )
+        .unwrap();
         assert_eq!(cfg.search.candidates, 20);
         assert_eq!(cfg.search.results, 3);
+        assert_eq!(cfg.search.rrf_k, 10.0);
+        assert_eq!(cfg.search.lexical_weight, 2.0);
+        assert_eq!(cfg.search.semantic_weight, 0.5);
         assert!(cfg.validate().is_ok());
 
         let mut bad = Config::default();
@@ -1280,6 +1309,13 @@ mod tests {
         assert!(bad.validate().is_err());
         bad = Config::default();
         bad.search.results = 0;
+        assert!(bad.validate().is_err());
+        bad = Config::default();
+        bad.search.rrf_k = 0.0;
+        assert!(bad.validate().is_err());
+        bad = Config::default();
+        bad.search.lexical_weight = 0.0;
+        bad.search.semantic_weight = 0.0;
         assert!(bad.validate().is_err());
     }
 

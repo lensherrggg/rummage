@@ -8,7 +8,7 @@ use crate::rerank::{self, GemmaEmbedder, RerankStore};
 use crate::store::{Store, StoredFile};
 use crate::tokenize;
 use anyhow::Result;
-use scour::{chunk_text_with_overlap, rrf_fuse_scored, HybridIndex};
+use scour::{chunk_text_with_overlap, HybridIndex};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,7 +16,23 @@ use walkdir::WalkDir;
 
 pub const RESULT_LIMIT: usize = 10;
 pub const EMBED_BATCH_DOCS: usize = 32;
-const RRF_K: f64 = 60.0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    Hybrid,
+    Lexical,
+    Semantic,
+}
+
+impl SearchMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "hybrid" | "rrf" => Some(Self::Hybrid),
+            "lexical" | "bm25" | "keyword" => Some(Self::Lexical),
+            "semantic" | "vector" | "embedding" => Some(Self::Semantic),
+            _ => None,
+        }
+    }
+}
 const CHUNK_BYTES: usize = 1024;
 const CHUNK_OVERLAP: usize = 128;
 const SNIPPET_CHARS: usize = 90;
@@ -762,6 +778,15 @@ impl IndexEngine {
     }
 
     pub fn search(&mut self, parsed: &ParsedQuery) -> Result<Vec<FileHit>> {
+        self.search_mode(parsed, SearchMode::Hybrid)
+    }
+
+    /// 只跑指定的一路，或按配置融合两路。评估/消融时使用；TUI 走 [`Self::search`]。
+    pub fn search_mode(
+        &mut self,
+        parsed: &ParsedQuery,
+        mode: SearchMode,
+    ) -> Result<Vec<FileHit>> {
         let ncfg = &self.cfg.normalize;
         let query_norm = normalize_query(&parsed.text, ncfg);
         let query_seg = tokenize::segment(&query_norm);
@@ -777,37 +802,61 @@ impl IndexEngine {
         let mut lexical_ranks: HashMap<i64, usize> = HashMap::new();
         let mut semantic_ranks: HashMap<i64, usize> = HashMap::new();
         if !parsed.text.trim().is_empty() {
-            let lexical = if query_seg.trim().is_empty() {
+            let lexical = if mode == SearchMode::Semantic || query_seg.trim().is_empty() {
                 Vec::new()
             } else {
                 self.hybrid.search_lexical(&query_seg, self.leg_top_k)
             };
-            let semantic = match self.model.as_mut() {
-                Some(model) => match model.embed_one(&query_norm) {
-                    Ok(vector) => Some(self.hybrid.search_semantic(&vector, self.leg_top_k)),
-                    Err(err) => {
-                        self.note_error(format!("查询向量生成失败，已降级为仅关键词检索：{err}"));
-                        self.model_status = ModelStatus::Unavailable {
-                            reason: err.to_string(),
-                        };
-                        self.model = None;
-                        None
-                    }
-                },
-                None => None,
+            let semantic = if mode == SearchMode::Lexical {
+                None
+            } else {
+                match self.model.as_mut() {
+                    Some(model) => match model.embed_one(&query_norm) {
+                        Ok(vector) => {
+                            Some(self.hybrid.search_semantic(&vector, self.leg_top_k))
+                        }
+                        Err(err) => {
+                            self.note_error(format!(
+                                "查询向量生成失败，已降级为仅关键词检索：{err}"
+                            ));
+                            self.model_status = ModelStatus::Unavailable {
+                                reason: err.to_string(),
+                            };
+                            self.model = None;
+                            None
+                        }
+                    },
+                    None => None,
+                }
             };
             lexical_ranks = file_ranks(&lexical);
             if let Some(sem) = &semantic {
                 semantic_ranks = file_ranks(sem);
             }
-            let ranked: Vec<(String, f64)> = match (lexical.is_empty(), semantic) {
-                (false, Some(sem)) => rrf_fuse_scored(&lexical, &sem, RRF_K),
-                (false, None) => lexical,
-                (true, Some(sem)) => sem
-                    .into_iter()
-                    .map(|(id, distance)| (id, 1.0 - f64::from(distance)))
-                    .collect(),
-                (true, None) => Vec::new(),
+            let ranked: Vec<(String, f64)> = match mode {
+                SearchMode::Lexical => lexical,
+                SearchMode::Semantic => semantic
+                    .map(|sem| {
+                        sem.into_iter()
+                            .map(|(id, distance)| (id, 1.0 - f64::from(distance)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                SearchMode::Hybrid => match (lexical.is_empty(), semantic) {
+                    (false, Some(sem)) => weighted_rrf(
+                        &lexical,
+                        &sem,
+                        self.cfg.search.rrf_k,
+                        self.cfg.search.lexical_weight,
+                        self.cfg.search.semantic_weight,
+                    ),
+                    (false, None) => lexical,
+                    (true, Some(sem)) => sem
+                        .into_iter()
+                        .map(|(id, distance)| (id, 1.0 - f64::from(distance)))
+                        .collect(),
+                    (true, None) => Vec::new(),
+                },
             };
             for (cid, score) in ranked {
                 if let Some((fid, idx)) = parse_chunk_position(&cid) {
@@ -872,7 +921,7 @@ impl IndexEngine {
                 .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
         });
         hits.truncate(self.result_limit);
-        let rerank = if !parsed.text.trim().is_empty() {
+        let rerank = if mode == SearchMode::Hybrid && !parsed.text.trim().is_empty() {
             self.rerank_hits(&query_norm, &mut hits)
         } else {
             None
@@ -1392,6 +1441,50 @@ fn file_ranks<S>(list: &[(String, S)]) -> HashMap<i64, usize> {
     ranks
 }
 
+fn weighted_rrf(
+    lexical: &[(String, f64)],
+    semantic: &[(String, f32)],
+    k: f64,
+    lexical_weight: f64,
+    semantic_weight: f64,
+) -> Vec<(String, f64)> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    let mut first_seen: HashMap<String, usize> = HashMap::new();
+    let mut order = 0usize;
+    let mut add = |id: &str, value: f64, first_seen: &mut HashMap<String, usize>| {
+        *scores.entry(id.to_string()).or_insert(0.0) += value;
+        first_seen.entry(id.to_string()).or_insert_with(|| {
+            order += 1;
+            order
+        });
+    };
+    if lexical_weight > 0.0 {
+        for (rank, (id, _)) in lexical.iter().enumerate() {
+            add(
+                id,
+                lexical_weight / (k + rank as f64 + 1.0),
+                &mut first_seen,
+            );
+        }
+    }
+    if semantic_weight > 0.0 {
+        for (rank, (id, _)) in semantic.iter().enumerate() {
+            add(
+                id,
+                semantic_weight / (k + rank as f64 + 1.0),
+                &mut first_seen,
+            );
+        }
+    }
+    let mut out: Vec<(String, f64)> = scores.into_iter().collect();
+    out.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| first_seen[&a.0].cmp(&first_seen[&b.0]))
+    });
+    out
+}
+
 fn chunk_at(norm_text: &str, chunk_idx: Option<usize>) -> Option<String> {
     let chunks = chunk_document(norm_text);
     let last = chunks.len().checked_sub(1)?;
@@ -1598,6 +1691,37 @@ mod tests {
 
     fn write_doc(root: &Path, name: &str, text: &str) {
         std::fs::write(root.join(name), text).unwrap();
+    }
+
+    #[test]
+    fn lexical_mode_skips_semantic() {
+        let dir = tempdir().unwrap();
+        write_doc(dir.path(), "a.md", "结算管理质效");
+        write_doc(dir.path(), "b.md", "光伏电站运维");
+        let mut engine = engine_for(dir.path());
+        engine.scan_lexical(|_| {}).unwrap();
+
+        let lexical = engine
+            .search_mode(&crate::query::parse("结算"), SearchMode::Lexical)
+            .unwrap();
+        assert_eq!(lexical.len(), 1);
+        assert!(lexical[0].path.ends_with("a.md"));
+        assert_eq!(lexical[0].detail.semantic_rank, None);
+
+        let semantic = engine
+            .search_mode(&crate::query::parse("结算"), SearchMode::Semantic)
+            .unwrap();
+        assert!(semantic.is_empty());
+    }
+
+    #[test]
+    fn weighted_rrf_combines_duplicate_chunks() {
+        let lexical = vec![("1#0".to_string(), 10.0), ("2#0".to_string(), 5.0)];
+        let semantic = vec![("2#0".to_string(), 0.1f32), ("1#0".to_string(), 0.2f32)];
+        let fused = weighted_rrf(&lexical, &semantic, 60.0, 2.0, 1.0);
+        assert_eq!(fused.len(), 2);
+        assert!(fused[0].1 > fused[1].1);
+        assert_eq!(fused[1].0, "2#0");
     }
 
     #[test]

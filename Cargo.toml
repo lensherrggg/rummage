@@ -37,6 +37,7 @@ roxmltree = "0.21"
 rusqlite = { version = "0.40", features = ["bundled"] }
 scour-search = { version = "0.1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokenizers = { version = "0.23", default-features = false }
 toml = "0.9"
 unicode-width = "0.2"

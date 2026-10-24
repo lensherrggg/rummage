@@ -1,0 +1,4 @@
+# 示例标注；把 relevant 换成自己索引里的真实路径
+{"id":"q001","query":"党委会纪要 2025","type":"keyword","relevant":["D:\\退休就删\\资料文档\\a.md"]}
+{"id":"q002","query":"光伏电站运维中的树线矛盾","type":"semantic","relevant":["D:\\退休就删\\资料文档\\b.pdf"]}
+{"id":"q003","query":"结算管理质效","type":"keyword","relevant":[],"grades":{"D:\\退休就删\\资料文档\\c.docx":2,"D:\\退休就删\\资料文档\\d.docx":1}}
