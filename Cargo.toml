@@ -51,5 +51,12 @@ scour-search = { path = "vendor/scour-search" }
 pdf-extract = { path = "vendor/pdf-extract" }
 rapidocr-core = { path = "vendor/rapidocr-core" }
 
+[features]
+# DirectML is enabled by default so a normal release build can use any DX12
+# GPU for OCR; runtime provider auto-detection falls back to CPU when the
+# driver/GPU is unavailable. Use --no-default-features for a CPU-only build.
+default = ["directml"]
+directml = ["rapidocr-core/directml"]
+
 [profile.release]
 lto = "thin"

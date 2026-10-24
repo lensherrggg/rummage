@@ -114,6 +114,14 @@ OCR 管线（`src/ocr.rs`）：
    - 缓存按页存，重建索引时可复用
 6. OCR 状态：`Disabled / Idle / Loading / Ready / Busy / Unavailable`，TUI 显示为 `OCR: 待加载/加载中/就绪/识别中/未就绪`
 
+推理后端：
+
+- `provider = "auto"`（默认）：先尝试 ONNX Runtime DirectML，初始化失败/驱动不支持时回退 CPU
+- `provider = "cpu"`：强制 CPU
+- `provider = "directml"`：强制 GPU，失败报错
+- 默认 release 构建包含 DirectML feature；`cargo build --release --no-default-features` 可打纯 CPU 版
+- PDFium 渲染和图片预处理仍在 CPU；只有 ONNX 推理走 GPU
+
 依赖：
 
 - `pdfium.dll` 7.2 MB（PDFium 7881，BSD-3-Clause）
@@ -163,8 +171,9 @@ OCR 管线（`src/ocr.rs`）：
 
 - 输入框 / 结果列表 / 详情叠层
 - `q` 在查询框是普通字符；`Esc` 关详情或退出；`Ctrl+C` 立即退出
-- 状态栏：监控、索引文件数与阶段百分比、模型、重排、OCR、焦点、页
-- 80 列窄屏且 OCR 启用时省略“焦点”字段，优先保留 OCR 和页码
+- 状态栏：监控、索引文件数与阶段百分比、模型、重排、OCR（`就绪·GPU` / `就绪·CPU`）、焦点、页
+- 状态栏下方固定一行消息区，错误/提示独占整行；窄屏不再把红字挤在状态栏右侧
+- 80 列窄屏且 OCR 启用时省略“焦点”字段，优先保留 OCR 和页码；OCR 字段用 `OCR:就绪·GPU` 紧凑写法
 - 结果页按当前可见行数动态计算；无结果不显示页信息
 
 ## 8. 日志
@@ -193,6 +202,7 @@ results = 10
 
 [ocr]
 enabled = true
+provider = "auto"
 dir = "D:\\tools\\rummage\\models\\ocr"
 pdfium = "D:\\tools\\rummage\\pdfium.dll"
 dpi = 200
@@ -243,6 +253,7 @@ D:\tools\rummage-portable-0.1.0-full\
 - OCR 选型：合成 11 页 + 真实 8 页；RapidOCR 准确率最高，Tesseract 次之，Windows OCR 快但表格顺序差且目标机可能无语言包
 - 启动扫描：50 个 Markdown 首次 1.29s，二次 0.02s（0 变更）；真实 1077 文件索引二次扫描约 18.7s（目录遍历/stat 占主导，未读文件内容）
 - OCR：3 页真实扫描件 release 约 15～23 秒（含首次加载）；224 页扫描件按 100 页上限约数分钟
+- DirectML OCR（AMD Radeon 780M，7 页真实扫描件，含首次加载）：`auto`（DirectML）13.9s，`cpu` 31.3s，约 2.2 倍；两者 OCR 文本均为 3596 字
 
 ## 12. 已知限制 / 后续方向
 
@@ -253,6 +264,7 @@ D:\tools\rummage-portable-0.1.0-full\
 5. 视觉向量（图表/图纸/照片）未实现；当前只做文本 OCR
 6. 快速扫描依赖 mtime+size；内容变但保留时间戳/大小的文件会漏检
 7. 目标内网机 CPU 可能较慢，OCR 耗时需在目标机重测
+8. DirectML 依赖 Windows 的 `DirectML.dll` 和可用 DX12 GPU；没有时自动回退 CPU。不同 GPU/驱动的收益差异很大，不能按本机 2.2 倍外推
 
 ## 13. 关键设计取舍
 
@@ -262,3 +274,4 @@ D:\tools\rummage-portable-0.1.0-full\
 - **PDFium 而非系统 PDF 渲染**：避免 Server Core/精简系统缺组件；代价是额外 7.2 MB DLL
 - **RapidOCR 而非 Tesseract/Windows OCR**：中文和表格顺序最好；代价是模型/集成复杂度
 - **mtime+size 快速路径**：用极小漏检风险换启动速度；需要时可通过重建索引兜底
+- **DirectML 默认启用、运行时可回退**：不要求用户装 CUDA；目标机没有 DX12/驱动不匹配时自动 CPU，避免“有 GPU 才能用”。代价是默认构建引入 DirectML EP

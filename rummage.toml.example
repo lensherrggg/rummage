@@ -27,6 +27,8 @@ results = 10
 # 扫描件 OCR：PDFium 渲染 + RapidOCR/PP-OCRv4 ONNX。
 # 默认开启；模型或 pdfium.dll 缺失时会自动降级为仅处理文字层。
 enabled = true
+# 推理后端：auto（优先 DirectML，失败回退 CPU）/ cpu / directml
+provider = "auto"
 # 省略时使用 exe 同目录的 models\ocr；需要 det.onnx / rec.onnx / dict.txt
 # dir = "D:\\tools\\rummage\\models\\ocr"
 # 省略时使用 exe 同目录的 pdfium.dll

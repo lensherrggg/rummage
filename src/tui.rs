@@ -1,5 +1,5 @@
 use crate::engine::{FileHit, IndexPhase, IndexStatus, ModelStatus};
-use crate::ocr::{self, OcrStatus};
+use crate::ocr::{self, OcrBackend, OcrStatus};
 use crate::query::{self, ParsedQuery};
 use crate::worker::{IndexMsg, UiMsg};
 use anyhow::Result;
@@ -46,6 +46,7 @@ pub struct App {
     awaiting: Option<u64>,
     max_results: usize,
     ocr_status: OcrStatus,
+    ocr_backend: OcrBackend,
     pub quit: bool,
 }
 
@@ -105,6 +106,7 @@ impl App {
             awaiting: None,
             max_results: 10,
             ocr_status: ocr::status(),
+            ocr_backend: ocr::backend(),
             quit: false,
         }
     }
@@ -144,6 +146,7 @@ impl App {
             }
         }
         self.ocr_status = ocr::status();
+        self.ocr_backend = ocr::backend();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> KeyOutcome {
@@ -396,6 +399,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(area)
     };
@@ -430,6 +434,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     } else {
         draw_separator(frame, chunks[1]);
         draw_status(frame, app, chunks[3], page);
+        draw_message(frame, app, chunks[4]);
     }
 
     if let Some(view) = &app.detail {
@@ -810,7 +815,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, page: Option<PageInfo>)
         app.status.indexed_files
     );
     if app.ocr_status != OcrStatus::Disabled {
-        base.push_str(&format!(" | OCR: {}", app.ocr_status.label()));
+        let backend = app.ocr_backend.label();
+        let suffix = if backend.is_empty()
+            || !matches!(app.ocr_status, OcrStatus::Ready | OcrStatus::Busy)
+        {
+            String::new()
+        } else {
+            format!("·{backend}")
+        };
+        // 窄屏下省掉冒号后的空格，给 OCR 后端和页信息留一位。
+        base.push_str(&format!(" | OCR:{}{suffix}", app.ocr_status.label()));
     }
     if app.status.rerank != ModelStatus::Disabled {
         let rerank = match &app.status.rerank {
@@ -829,24 +843,30 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, page: Option<PageInfo>)
         base.push_str(&format!(" | {}", page.label()));
     }
 
-    let mut spans = vec![Span::styled(base.clone(), Style::default().fg(Color::Gray))];
-    let error = app
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            base,
+            Style::default().fg(Color::Gray),
+        ))),
+        area,
+    );
+}
+
+fn draw_message(frame: &mut Frame, app: &App, area: Rect) {
+    let message = app
         .toast
         .as_ref()
         .map(|(message, _)| message.clone())
         .or_else(|| app.status.last_error.clone());
-    if let Some(error) = error {
-        let remaining =
-            (area.width as usize).saturating_sub(UnicodeWidthStr::width(base.as_str()) + 3);
-        if remaining > 4 {
-            spans.push(Span::raw(" | "));
-            spans.push(Span::styled(
-                fit_right(&error, remaining),
+    if let Some(message) = message {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                fit_left(&message, area.width as usize),
                 Style::default().fg(Color::Red),
-            ));
-        }
+            ))),
+            area,
+        );
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn fit_left(text: &str, max_width: usize) -> String {
@@ -868,29 +888,6 @@ fn fit_left(text: &str, max_width: usize) -> String {
     }
     let mut s: String = out.into_iter().collect();
     s.push('…');
-    s
-}
-
-fn fit_right(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out: Vec<char> = Vec::new();
-    let mut width = 0;
-    for ch in text.chars().rev() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + w > max_width.saturating_sub(1) {
-            break;
-        }
-        width += w;
-        out.push(ch);
-    }
-    out.reverse();
-    let mut s = String::from("…");
-    s.extend(out);
     s
 }
 
@@ -978,15 +975,17 @@ mod tests {
     fn status_bar_shows_ocr_status_when_enabled() {
         let mut app = app_with_hits(3);
         app.ocr_status = OcrStatus::Ready;
+        app.ocr_backend = OcrBackend::DirectMl;
         let text = render(&app, 140, 30);
-        assert!(text.contains("OCR: 就绪"), "{text}");
+        assert!(text.contains("OCR:就绪·GPU"), "{text}");
 
         // 80 列时优先保留 OCR 和页信息，焦点字段让位。
         let narrow = render(&app, 80, 20);
-        assert!(narrow.contains("OCR: 就绪"), "{narrow}");
+        assert!(narrow.contains("OCR:就绪·GPU"), "{narrow}");
         assert!(narrow.contains("页 1/1"), "{narrow}");
 
         app.ocr_status = OcrStatus::Disabled;
+        app.ocr_backend = OcrBackend::Unknown;
         let text = render(&app, 140, 30);
         assert!(!text.contains("OCR:"), "{text}");
     }
@@ -1345,5 +1344,10 @@ mod tests {
         app.toast = Some(("剪贴板不可用".to_string(), Instant::now()));
         let text = render(&app, 100, 20);
         assert!(text.contains("剪贴板不可用"), "{text}");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.last().is_some_and(|line| line.contains("剪贴板不可用")),
+            "{text}"
+        );
     }
 }

@@ -106,11 +106,23 @@ impl Default for SearchConfig {
 const UNSUPPORTED_BINARY_EXTENSIONS: &[&str] = &["doc", "xls", "xlsx", "ppt", "pptx"];
 
 /// 可选的扫描件 OCR：PDFium 负责渲染，RapidOCR/PP-OCRv4 ONNX 负责识别。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrProvider {
+    /// 优先 DirectML（需 DirectML-capable Windows/GPU），失败回退 CPU。
+    #[default]
+    Auto,
+    Cpu,
+    DirectMl,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct OcrConfig {
     /// 默认开启；模型或 PDFium 缺失时自动降级为只处理文字层。
     pub enabled: bool,
+    /// OCR 推理后端：auto / cpu / directml。
+    pub provider: OcrProvider,
     /// OCR 模型目录，默认是 exe 同目录的 `models\ocr`。
     pub dir: Option<PathBuf>,
     /// PDFium 动态库路径，默认是 exe 同目录的 `pdfium.dll`。
@@ -126,6 +138,7 @@ impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            provider: OcrProvider::Auto,
             dir: None,
             pdfium: None,
             dpi: 200,
@@ -1275,17 +1288,19 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.index.textless_pdf);
         assert!(cfg.ocr.enabled);
+        assert_eq!(cfg.ocr.provider, OcrProvider::Auto);
         assert_eq!(cfg.ocr.dpi, 200);
         assert_eq!(cfg.ocr.max_pages, 100);
         assert_eq!(cfg.ocr.min_text_chars, 20);
         assert!(cfg.validate().is_ok());
 
         let cfg: Config = toml::from_str(
-            "[index]\ntextless_pdf = false\n\n[ocr]\nenabled = false\ndpi = 150\nmax_pages = 10\nmin_text_chars = 5\n",
+            "[index]\ntextless_pdf = false\n\n[ocr]\nenabled = false\nprovider = \"directml\"\ndpi = 150\nmax_pages = 10\nmin_text_chars = 5\n",
         )
         .unwrap();
         assert!(!cfg.index.textless_pdf);
         assert!(!cfg.ocr.enabled);
+        assert_eq!(cfg.ocr.provider, OcrProvider::DirectMl);
         assert_eq!(cfg.ocr.dpi, 150);
         assert_eq!(cfg.ocr.max_pages, 10);
         assert_eq!(cfg.ocr.min_text_chars, 5);

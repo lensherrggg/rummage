@@ -68,7 +68,12 @@ fn run(log_path: Option<&Path>) -> Result<()> {
     if cfg.ocr.enabled {
         let dir = cfg.ocr.resolve_dir(&loaded.base);
         let pdfium = cfg.ocr.resolve_pdfium(&loaded.base);
-        log::info!("OCR 模型：{}；PDFium：{}", dir.display(), pdfium.display());
+        log::info!(
+            "OCR 模型：{}；PDFium：{}；推理后端：{:?}",
+            dir.display(),
+            pdfium.display(),
+            cfg.ocr.provider
+        );
         ocr::configure(
             &cfg.ocr,
             &loaded.base,

@@ -4,7 +4,7 @@
 //! Both are optional at runtime: if the DLL or models are missing, OCR is
 //! disabled with a logged warning and text-layer extraction keeps working.
 
-use crate::config::OcrConfig;
+use crate::config::{OcrConfig, OcrProvider};
 use anyhow::{bail, Context, Result};
 use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
 use rapidocr_core::{
@@ -20,6 +20,7 @@ use std::sync::{Mutex, OnceLock};
 #[derive(Debug, Clone)]
 struct OcrOptions {
     enabled: bool,
+    provider: OcrProvider,
     dir: PathBuf,
     pdfium: PathBuf,
     dpi: u32,
@@ -31,6 +32,7 @@ impl OcrOptions {
     fn from_config(cfg: &OcrConfig, base: &Path, _index_dir: &Path) -> Self {
         Self {
             enabled: cfg.enabled,
+            provider: cfg.provider,
             dir: cfg.resolve_dir(base),
             pdfium: cfg.resolve_pdfium(base),
             dpi: cfg.dpi,
@@ -44,6 +46,11 @@ static OPTIONS: OnceLock<OcrOptions> = OnceLock::new();
 static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static TEXTLESS_PDF: OnceLock<bool> = OnceLock::new();
 static STATUS: AtomicU8 = AtomicU8::new(0);
+static BACKEND: AtomicU8 = AtomicU8::new(0);
+
+const BACKEND_UNKNOWN: u8 = 0;
+const BACKEND_CPU: u8 = 1;
+const BACKEND_DIRECTML: u8 = 2;
 
 const STATUS_DISABLED: u8 = 0;
 const STATUS_IDLE: u8 = 1;
@@ -62,6 +69,23 @@ pub enum OcrStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcrBackend {
+    Unknown,
+    Cpu,
+    DirectMl,
+}
+
+impl OcrBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "",
+            Self::Cpu => "CPU",
+            Self::DirectMl => "GPU",
+        }
+    }
+}
+
 impl OcrStatus {
     pub fn label(self) -> &'static str {
         match self {
@@ -72,6 +96,14 @@ impl OcrStatus {
             Self::Busy => "识别中",
             Self::Unavailable => "未就绪",
         }
+    }
+}
+
+pub fn backend() -> OcrBackend {
+    match BACKEND.load(Ordering::Relaxed) {
+        BACKEND_CPU => OcrBackend::Cpu,
+        BACKEND_DIRECTML => OcrBackend::DirectMl,
+        _ => OcrBackend::Unknown,
     }
 }
 
@@ -114,6 +146,7 @@ pub fn configure(
     textless_pdf: bool,
 ) -> Option<PathBuf> {
     let _ = TEXTLESS_PDF.set(textless_pdf);
+    BACKEND.store(BACKEND_UNKNOWN, Ordering::Relaxed);
     if !textless_pdf {
         STATUS.store(STATUS_DISABLED, Ordering::Relaxed);
         log::info!("无文字层 PDF：跳过（[index] textless_pdf = false）");
@@ -126,9 +159,10 @@ pub fn configure(
     STATUS.store(STATUS_IDLE, Ordering::Relaxed);
     let options = OcrOptions::from_config(cfg, base, index_dir);
     log::info!(
-        "OCR：启用；模型目录 {}；PDFium {}；DPI {}；最多 {} 页",
+        "OCR：启用；模型目录 {}；PDFium {}；后端 {:?}；DPI {}；最多 {} 页",
         options.dir.display(),
         options.pdfium.display(),
+        options.provider,
         options.dpi,
         if options.max_pages == 0 {
             "不限".to_string()
@@ -248,13 +282,23 @@ impl OcrRuntime {
             batch_size: 6,
         });
         cfg.cls = None;
-        let ocr = RapidOcr::new(cfg, &env).context("初始化 RapidOCR 失败")?;
+        let (ocr, provider) = load_rapidocr(cfg, &env, options.provider)?;
+        BACKEND.store(
+            if provider == "directml" {
+                BACKEND_DIRECTML
+            } else {
+                BACKEND_CPU
+            },
+            Ordering::Relaxed,
+        );
+        log::info!("OCR 推理后端：{provider}");
 
         let cache_key = format!(
-            "{}x{}-{}-{}",
+            "{}x{}-{}-{}-{}",
             det.metadata()?.len(),
             rec.metadata()?.len(),
             options.dpi,
+            provider,
             "ppocrv4"
         );
         let cache_dir = CACHE_DIR
@@ -378,6 +422,45 @@ impl OcrRuntime {
             .into_iter()
             .filter_map(|page| cache.pages.get(&page).cloned().map(|text| (page, text)))
             .collect()
+    }
+}
+
+fn load_rapidocr(
+    mut cfg: RapidOcrConfig,
+    env: &ort::environment::Environment,
+    provider: OcrProvider,
+) -> Result<(RapidOcr, &'static str)> {
+    let use_directml = match provider {
+        OcrProvider::Cpu => false,
+        OcrProvider::DirectMl => {
+            if !cfg!(feature = "directml") {
+                bail!("配置要求 DirectML，但当前构建未启用 directml feature");
+            }
+            true
+        }
+        OcrProvider::Auto => cfg!(feature = "directml"),
+    };
+
+    if !use_directml {
+        cfg.inference.execution_provider = rapidocr_core::config::ExecutionProvider::Cpu;
+        return Ok((
+            RapidOcr::new(cfg, env).context("初始化 RapidOCR（CPU）失败")?,
+            "cpu",
+        ));
+    }
+
+    cfg.inference.execution_provider = rapidocr_core::config::ExecutionProvider::DirectMl;
+    match RapidOcr::new(cfg.clone(), env) {
+        Ok(ocr) => Ok((ocr, "directml")),
+        Err(err) if provider == OcrProvider::Auto => {
+            log::warn!("DirectML OCR 初始化失败，回退 CPU：{err:#}");
+            cfg.inference.execution_provider = rapidocr_core::config::ExecutionProvider::Cpu;
+            Ok((
+                RapidOcr::new(cfg, env).context("初始化 RapidOCR（CPU 回退）失败")?,
+                "cpu",
+            ))
+        }
+        Err(err) => Err(err).context("初始化 RapidOCR（DirectML）失败"),
     }
 }
 
