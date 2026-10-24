@@ -724,7 +724,7 @@ cargo build --release --no-default-features
 
 架构、索引流程、OCR、线程模型和设计取舍见 [DESIGN.md](DESIGN.md)。
 
-检索质量评测（Recall / MRR / nDCG / 三路基线）见 [EVAL.md](EVAL.md)，示例查询集在 `eval/queries.example.jsonl`。
+检索质量评测（Recall / MRR / nDCG / 三路基线）见 [EVAL.md](EVAL.md)，标注规范见 [ANNOTATION.md](ANNOTATION.md)，示例查询集在 `eval/queries.example.jsonl`。
 
 环境：Windows 11 x64、Rust 1.87+（MSVC 工具链，本机以 Visual Studio 2022 验证）。
 

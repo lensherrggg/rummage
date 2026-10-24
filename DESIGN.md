@@ -256,7 +256,7 @@ D:\tools\rummage-portable-0.1.0-full\
 - `[search] rrf_k` / `lexical_weight` / `semantic_weight` 可覆盖，用于扫参
 - 默认关闭 rerank，避免单路基线被二次重排干扰；`--rerank` 可测完整链路
 - 三路同时运行时输出融合税：混合首个相关排名劣于较好单路的查询数 / 至少一路命中的查询数
-- 标注格式与流程见 [EVAL.md](EVAL.md)
+- 标注格式与流程见 [EVAL.md](EVAL.md)，给人工/其他 AI agent 的标注规范见 [ANNOTATION.md](ANNOTATION.md)
 
 ## 12. 验证与性能基线
 

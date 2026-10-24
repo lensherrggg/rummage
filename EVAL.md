@@ -16,6 +16,8 @@ target\release\rummage-eval.exe
 
 ## 2. 查询集格式
 
+标注流程、相关性判定、给其他 AI agent 的提示词见 [ANNOTATION.md](ANNOTATION.md)。
+
 一行一个 JSON 对象（JSONL），路径写索引中的真实绝对路径：
 
 ```json
