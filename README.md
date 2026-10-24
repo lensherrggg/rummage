@@ -265,7 +265,7 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 - 状态栏：监控/索引/模型/重排/OCR/焦点/页
 - 最底下一行：消息区，显示最近一次错误或提示（红字，整行宽度，不再和状态栏挤在一起）
 - 焦点切到结果列表时，结果区底部出现提示行 `c 复制路径   j/k 选择   Enter 详情   Tab 返回查询`
-- 在结果列表按 `Enter` 会叠一层详情：显示完整路径、关键词/语义名次、融合分、重排分与名次变化，以及最佳匹配块的全文（命中词同样黄色高亮）；详情层内 `j`/`k` 滚动、`Esc` 关闭
+- 在结果列表按 `Enter` 会叠一层详情：显示完整路径、关键词/语义名次、融合分、重排分与名次变化，以及最佳匹配块的全文；同一文件里分数达到阈值的其他片段也会列在“其他相关片段”下（命中词同样黄色高亮）；详情层内 `j`/`k` 滚动、`Esc` 关闭
 - 检索结果为空或尚未检索时：`输入查询后按 Enter 检索`
 
 详情层大致如下（`Esc` 关闭后回到结果列表；没有详情层时 `Esc` 才是退出）：
@@ -279,6 +279,10 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 
 最佳匹配片段
 合并硬换行的规则：段内单换行视为软换行，直接拼接；段落边界才保留…
+
+其他相关片段
+片段 3 · 分数 0.0298
+如果 OCR 把段落边界识别成硬换行，先按标点判断句子是否连续…
 
 Esc 关闭   j/k 滚动
 ```
@@ -323,7 +327,7 @@ Esc 关闭   j/k 滚动
 - 引号未闭合时，后半段当作普通查询文本
 - 只有过滤器、没有正文也可以检索，例如 `dir:docs` 会按过滤器列出已索引文件（顺序不固定，仍受 `[search] results` 上限约束）
 
-检索流程：查询归一化 → jieba 分词并过滤中文虚词 → BM25 取每路候选 Top N + 语义取 Top N（`[search] candidates`，默认 50）→ RRF（k=60）融合 → 按文件取最高分去重 → 最多 M 条（`[search] results`，默认 10）。
+检索流程：查询归一化 → jieba 分词并过滤中文虚词 → BM25 取每路候选 Top N + 语义取 Top N（`[search] candidates`，默认 50）→ RRF（默认 k=60）融合 → 按文件取最高分去重 → 最多 M 条（`[search] results`，默认 10）。
 
 `candidates` 是**聚合前的分块候选数**，不是最终结果条数；调大能让更多文件进入融合与重排，但查询会略慢。`results` 才是结果列表显示的文件数上限。
 
@@ -370,6 +374,8 @@ textless_pdf = true               # 是否处理无文字层 PDF；false = 直�
 [search]
 candidates = 50                   # 关键词/语义每路先取多少个分块候选（默认 50）
 results = 10                      # 最终最多显示多少个文件结果（默认 10；小终端最多 5）
+related_chunks = 3                # 详情层额外展示同文件几个高相关片段；0 = 关闭
+related_ratio = 0.8               # 额外片段最低分 = 最佳片段分 × 该比例
 
 [ocr]
 enabled = true                    # 默认开启；模型/PDFium 缺失时自动降级
@@ -427,6 +433,8 @@ max_length = 1024                 # 分词最大长度
 ```
 
 `[search]` 控制检索规模：`candidates` 是关键词、语义两路各自先取的**分块**候选数，聚合到文件后再截断到 `results` 条。两者都必须大于 0；省略时保持旧行为（50 / 10）。把 `results` 调大后，`Enter` 详情、`j`/`k` 选择和翻页照常工作，终端高度不够时仍按页滚动。
+
+同文件的其他高相关片段由 `related_chunks`（默认 3，0 关闭）和 `related_ratio`（默认 0.8）控制：片段分数必须达到该文件最佳片段分的 80% 才会进入详情层。这里只影响展示，不改变文件排序。
 
 `[ocr]` 控制扫描件 OCR：默认开启；缺少 `det.onnx` / `rec.onnx` / `dict.txt` 或 `pdfium.dll` 时只记录警告并降级为文字层提取，不会影响普通 PDF。OCR 只处理文字少于 `min_text_chars` 的页，单个 PDF 最多处理 `max_pages` 页；识别结果缓存在索引目录的 `ocr-cache\`，重建索引时可复用。`dpi` 越高越清晰但越慢，200 是推荐起点。
 
@@ -735,7 +743,7 @@ cargo build --release
 产物为 `target\release\rummage.exe`。注意它默认在自身同目录找模型，见 1.1。
 
 ```powershell
-cargo test                              # 135 个单元测试 + 2 个监控集成测试，不需要模型
+cargo test                              # 137 个单元测试 + 2 个监控集成测试，不需要模型
 cargo test --test e2e_model -- --ignored # 真实 ONNX 模型端到端（需 models\ 下的文件）
 cargo clippy --all-targets
 ```

@@ -22,6 +22,10 @@ textless_pdf = true
 candidates = 50
 # 最终返回并在结果列表里显示的文件数上限。默认 10；小终端最多显示 5 条。
 results = 10
+# 详情层额外展示同一文件几个相关片段；0 = 只显示最佳片段。
+related_chunks = 3
+# 额外片段的最低分 = 该文件最佳片段分 × 该比例。
+related_ratio = 0.8
 # 高级：RRF 融合参数。默认 k=60、两路等权；评估时可用 rummage-eval 覆盖。
 # rrf_k = 60.0
 # lexical_weight = 1.0

@@ -626,7 +626,9 @@ fn detail_lines(app: &App, hit: &FileHit) -> Vec<Line<'static>> {
         (None, None) => "空查询：按路径列出全部文件".to_string(),
     };
     let score = match (hit.detail.lexical_rank, hit.detail.semantic_rank) {
-        (Some(_), Some(_)) => format!("{:.4}（RRF，k=60）", hit.detail.fused_score),
+        (Some(_), Some(_)) => {
+            format!("{:.4}（RRF，k={:.0}）", hit.detail.fused_score, hit.detail.rrf_k)
+        }
         (Some(_), None) => format!("{:.4}（BM25）", hit.detail.fused_score),
         (None, Some(_)) => format!("{:.4}", hit.detail.fused_score),
         (None, None) => String::new(),
@@ -670,6 +672,44 @@ fn detail_lines(app: &App, hit: &FileHit) -> Vec<Line<'static>> {
                 })
                 .collect::<Vec<_>>(),
         ));
+    }
+
+    if !hit.related.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(label("其他相关片段")));
+        for chunk in &hit.related {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "片段 {} · 分数 {:.4}",
+                    chunk.chunk_index + 1,
+                    chunk.score
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+            if chunk.spans.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "（无可展示文本）",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            } else {
+                lines.push(Line::from(
+                    chunk
+                        .spans
+                        .iter()
+                        .map(|(text, highlight)| {
+                            let style = if *highlight {
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            };
+                            Span::styled(text.clone(), style)
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
     }
     lines
 }
@@ -933,7 +973,9 @@ mod tests {
                         after: i + 1,
                     }),
                     rerank_applied: true,
+                    rrf_k: 60.0,
                 },
+                related: Vec::new(),
             })
             .collect();
         app
@@ -1266,6 +1308,22 @@ mod tests {
         assert!(text.contains("最佳匹配片段"), "{text}");
         assert!(text.contains("结算管理质效：统一台账，按月核对并归档。"), "{text}");
         assert!(text.contains("Esc 关闭"), "{text}");
+    }
+
+    #[test]
+    fn detail_shows_other_related_chunks() {
+        let mut app = app_with_hits(1);
+        app.hits[0].related.push(crate::engine::RelatedChunk {
+            chunk_index: 2,
+            score: 0.0201,
+            spans: vec![("另一个相关段落".to_string(), false)],
+        });
+        app.focus = Focus::Results;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let text = render(&app, 100, 30);
+        assert!(text.contains("其他相关片段"), "{text}");
+        assert!(text.contains("片段 3"), "{text}");
+        assert!(text.contains("另一个相关段落"), "{text}");
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub struct SearchConfig {
     pub lexical_weight: f64,
     /// RRF 中语义一路的权重。
     pub semantic_weight: f64,
+    /// 同一文件最多额外展示多少个相关片段；0 = 只展示最佳片段。
+    pub related_chunks: usize,
+    /// 额外片段的最低分 = 最佳片段分 × 该比例。
+    pub related_ratio: f64,
 }
 
 impl Default for SearchConfig {
@@ -106,6 +110,8 @@ impl Default for SearchConfig {
             rrf_k: 60.0,
             lexical_weight: 1.0,
             semantic_weight: 1.0,
+            related_chunks: 3,
+            related_ratio: 0.8,
         }
     }
 }
@@ -343,6 +349,11 @@ impl Config {
         }
         if self.search.lexical_weight == 0.0 && self.search.semantic_weight == 0.0 {
             bail!("search.lexical_weight 和 search.semantic_weight 不能同时为 0");
+        }
+        if !self.search.related_ratio.is_finite()
+            || !(0.0..=1.0).contains(&self.search.related_ratio)
+        {
+            bail!("search.related_ratio 必须在 0 和 1 之间");
         }
         if !(72..=600).contains(&self.ocr.dpi) {
             bail!("ocr.dpi 必须在 72 和 600 之间");

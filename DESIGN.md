@@ -154,6 +154,7 @@ OCR 管线（`src/ocr.rs`）：
 
 - `[search] candidates`：每路分块候选数，默认 50
 - `[search] results`：最终文件数，默认 10
+- `[search] related_chunks` / `related_ratio`：详情层同文件额外片段数和相对分数阈值，默认 3 / 0.8
 - `[rerank] top_n`：只重排基础排序前 N 个文件
 - 结果列表按可见行数分页，状态栏显示 `页 X/Y`
 
@@ -175,6 +176,7 @@ OCR 管线（`src/ocr.rs`）：
 - 状态栏下方固定一行消息区，错误/提示独占整行；窄屏不再把红字挤在状态栏右侧
 - 80 列窄屏且 OCR 启用时省略“焦点”字段，优先保留 OCR 和页码；OCR 字段用 `OCR:就绪·GPU` 紧凑写法
 - 结果页按当前可见行数动态计算；无结果不显示页信息
+- 详情层展示最佳匹配块；同文件分数 ≥ 最佳分 × `related_ratio` 的其他片段列在“其他相关片段”，最多 `related_chunks` 个
 
 ## 8. 日志
 
@@ -202,6 +204,8 @@ results = 10
 rrf_k = 60.0
 lexical_weight = 1.0
 semantic_weight = 1.0
+related_chunks = 3
+related_ratio = 0.8
 
 [ocr]
 enabled = true
@@ -260,7 +264,7 @@ D:\tools\rummage-portable-0.1.0-full\
 
 ## 12. 验证与性能基线
 
-- 单元测试：135 个（`cargo test --offline`）
+- 单元测试：137 个（`cargo test --offline`）
 - 监控集成测试：2 个
 - PDF 加固：594 页机考 PDF 由 5 页 panic 降为 0；109 份高风险样本逐页 0 panic（3 条文件级 xref/trailer 损坏仍需专门修复）
 - OCR 选型：合成 11 页 + 真实 8 页；RapidOCR 准确率最高，Tesseract 次之，Windows OCR 快但表格顺序差且目标机可能无语言包
@@ -281,7 +285,7 @@ D:\tools\rummage-portable-0.1.0-full\
 
 ## 14. 关键设计取舍
 
-- **文件级结果**：检索结果定位到文件，详情层展示最佳块；不引入段落级结果列表
+- **文件级结果 + 详情层多片段**：结果列表仍定位到文件；详情层展示最佳块，并附带同文件达到相对阈值的其他块；不引入段落级结果列表，避免同一文件刷屏
 - **页级 OCR 回退**：只 OCR 缺字页，避免整份重做；代价是版面/表格顺序仍由 OCR 决定
 - **OCR 缓存放索引目录**：便于重建索引复用，但删除索引会丢缓存；需要时可把缓存目录外置
 - **PDFium 而非系统 PDF 渲染**：避免 Server Core/精简系统缺组件；代价是额外 7.2 MB DLL

@@ -91,6 +91,17 @@ pub struct FileHit {
     /// `(text, highlighted)` spans.
     pub snippet: Vec<(String, bool)>,
     pub detail: HitDetail,
+    /// Same-file chunks above `[search] related_ratio`, excluding the best chunk.
+    pub related: Vec<RelatedChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RelatedChunk {
+    /// Zero-based chunk index within the file.
+    pub chunk_index: usize,
+    pub score: f64,
+    /// Full chunk, pre-split into `(text, highlighted)` spans.
+    pub spans: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +120,8 @@ pub struct HitDetail {
     pub rerank: Option<RerankDetail>,
     /// Whether rerank ran at all for this query.
     pub rerank_applied: bool,
+    /// RRF k used, for display.
+    pub rrf_k: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -799,6 +812,7 @@ impl IndexEngine {
 
         let mut scores: HashMap<i64, f64> = HashMap::new();
         let mut best_chunk: HashMap<i64, (usize, f64)> = HashMap::new();
+        let mut chunk_scores: HashMap<i64, Vec<(usize, f64)>> = HashMap::new();
         let mut lexical_ranks: HashMap<i64, usize> = HashMap::new();
         let mut semantic_ranks: HashMap<i64, usize> = HashMap::new();
         if !parsed.text.trim().is_empty() {
@@ -877,6 +891,7 @@ impl IndexEngine {
                             }
                         })
                         .or_insert((idx, score));
+                    chunk_scores.entry(fid).or_default().push((idx, score));
                 }
             }
         }
@@ -930,18 +945,37 @@ impl IndexEngine {
         Ok(hits
             .into_iter()
             .map(|(id, path, score)| {
-                let (snippet, detail_spans) = match self.files.get(&id) {
+                let (snippet, detail_spans, related) = match self.files.get(&id) {
                     Some(info) => {
-                        let idx = best_chunk.get(&id).map(|(idx, _)| *idx);
-                        match chunk_at(&info.norm_text, idx) {
-                            Some(chunk) => (
-                                build_snippet(&chunk, &query_norm),
-                                build_detail(&chunk, &query_norm),
-                            ),
-                            None => (Vec::new(), Vec::new()),
-                        }
+                        let chunks = chunk_document(&info.norm_text);
+                        let best = best_chunk.get(&id).copied().or_else(|| {
+                            // Empty query lists all files; show the opening chunk.
+                            chunks.first().map(|_| (0, 0.0))
+                        });
+                        let detail_spans = best
+                            .and_then(|(idx, _)| chunks.get(idx))
+                            .map(|chunk| build_detail(chunk, &query_norm))
+                            .unwrap_or_default();
+                        let snippet = best
+                            .and_then(|(idx, _)| chunks.get(idx))
+                            .map(|chunk| build_snippet(chunk, &query_norm))
+                            .unwrap_or_default();
+                        let related = best
+                            .map(|(best_idx, best_score)| {
+                                build_related_chunks(
+                                    &chunks,
+                                    chunk_scores.get(&id),
+                                    best_idx,
+                                    best_score,
+                                    self.cfg.search.related_chunks,
+                                    self.cfg.search.related_ratio,
+                                    &query_norm,
+                                )
+                            })
+                            .unwrap_or_default();
+                        (snippet, detail_spans, related)
                     }
-                    None => (Vec::new(), Vec::new()),
+                    None => (Vec::new(), Vec::new(), Vec::new()),
                 };
                 FileHit {
                     path: PathBuf::from(path),
@@ -953,7 +987,9 @@ impl IndexEngine {
                         fused_score: score,
                         rerank: rerank.as_ref().and_then(|r| r.details.get(&id).copied()),
                         rerank_applied: rerank.is_some(),
+                        rrf_k: self.cfg.search.rrf_k,
                     },
+                    related,
                 }
             })
             .collect())
@@ -1485,12 +1521,49 @@ fn weighted_rrf(
     out
 }
 
-fn chunk_at(norm_text: &str, chunk_idx: Option<usize>) -> Option<String> {
-    let chunks = chunk_document(norm_text);
-    let last = chunks.len().checked_sub(1)?;
-    chunks
+fn build_related_chunks(
+    chunks: &[String],
+    scores: Option<&Vec<(usize, f64)>>,
+    best_idx: usize,
+    best_score: f64,
+    limit: usize,
+    ratio: f64,
+    query_norm: &str,
+) -> Vec<RelatedChunk> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let Some(scores) = scores else {
+        return Vec::new();
+    };
+    let mut best_by_chunk: HashMap<usize, f64> = HashMap::new();
+    for (idx, score) in scores {
+        let entry = best_by_chunk.entry(*idx).or_insert(*score);
+        if *score > *entry {
+            *entry = *score;
+        }
+    }
+    let threshold = best_score * ratio;
+    let mut rows: Vec<(usize, f64)> = best_by_chunk
         .into_iter()
-        .nth(chunk_idx.unwrap_or(0).min(last))
+        .filter(|(idx, score)| *idx != best_idx && *score >= threshold)
+        .collect();
+    rows.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    rows.into_iter()
+        .take(limit)
+        .filter_map(|(idx, score)| {
+            let chunk = chunks.get(idx)?;
+            Some(RelatedChunk {
+                chunk_index: idx,
+                score,
+                spans: build_detail(chunk, query_norm),
+            })
+        })
+        .collect()
 }
 
 fn build_snippet(chunk: &str, query_norm: &str) -> Vec<(String, bool)> {
@@ -1722,6 +1795,24 @@ mod tests {
         assert_eq!(fused.len(), 2);
         assert!(fused[0].1 > fused[1].1);
         assert_eq!(fused[1].0, "2#0");
+    }
+
+    #[test]
+    fn related_chunks_survive_file_aggregation() {
+        let dir = tempdir().unwrap();
+        write_doc(dir.path(), "long.md", &"关键词".repeat(200));
+        let mut cfg = config_without_model();
+        cfg.search.related_chunks = 5;
+        cfg.search.related_ratio = 0.0;
+        let mut engine = engine_for_cfg(dir.path(), cfg);
+        engine.scan_lexical(|_| {}).unwrap();
+
+        let hits = engine
+            .search_mode(&crate::query::parse("关键词"), SearchMode::Hybrid)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(!hits[0].related.is_empty(), "{:?}", hits[0].related);
+        assert!(hits[0].related.len() <= 5);
     }
 
     #[test]
