@@ -1,0 +1,13 @@
+pub mod config;
+pub mod embed;
+pub mod engine;
+pub mod extract;
+pub mod normalize;
+pub mod persist;
+pub mod query;
+pub mod rerank;
+pub mod store;
+pub mod tokenize;
+pub mod tui;
+pub mod watcher;
+pub mod worker;

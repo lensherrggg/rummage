@@ -1,0 +1,7 @@
+/target
+/.rummage
+/models
+/_work
+*.pdb
+/dist
+/WORKLOG.local.md

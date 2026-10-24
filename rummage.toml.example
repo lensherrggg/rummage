@@ -1,0 +1,92 @@
+# Rummage 配置示例：复制为 rummage.toml 后按需修改。
+# 所有字段都可省略，省略时使用默认值。
+
+[watch]
+# 未通过 --dir 指定目录时使用
+roots = ["D:\\docs"]
+debounce_ms = 500
+
+[index]
+# 省略时使用第一个监控根目录下的 .rummage
+# dir = "D:\\docs\\.rummage"
+# 参与索引的扩展名；省略时默认 ["md", "markdown", "docx", "pdf", "ofd"]。
+# md/markdown 及自定义文本扩展名按 UTF-8 读取；docx 取正文文字；pdf/ofd 只取文字层。
+# 扫描版 PDF、纯图片 OFD（无文字层）会跳过，不做 OCR；doc/xls/xlsx/ppt/pptx 暂不支持。
+extensions = ["md", "markdown", "docx", "pdf", "ofd"]
+
+[search]
+# 关键词与语义两路各自先取多少个分块候选，再按文件聚合。默认 50。
+# 调大可提高召回，但融合与重排的输入更多、查询稍慢。
+candidates = 50
+# 最终返回并在结果列表里显示的文件数上限。默认 10；小终端最多显示 5 条。
+results = 10
+
+[include]
+# 索引白名单；留空或删除本节表示全部收录。
+# 不含分隔符的模式匹配文件名；含分隔符的模式匹配相对监控根目录的路径。
+# 支持 * ? [abc] [!abc]；* 不跨目录，** 可跨目录。
+# patterns = ["会议纪要*", "2025/**"]
+patterns = []
+
+[ignore]
+# 追加到内置忽略列表；内置项不可删除。
+# 按目录名 / 文件名匹配，不区分大小写，支持通配符 * ? [abc] [!abc]。
+# 同时命中 include 与 ignore 时，ignore 优先。
+dirs = ["drafts*", "20??_归档", "临时[0-9]"]
+names = ["desktop.ini", "~$*"]
+
+[normalize]
+enabled = true
+control_chars = true
+width_fold = true
+merge_hard_breaks = true
+drop_page_number_lines = true
+drop_page_markers = true
+drop_repeated_headers = true
+collapse_blank_lines = true
+collapse_spaces = true
+strip_markdown = true
+links = true
+table_pipes = true
+front_matter = true
+page_number_max_len = 20
+header_footer_max_len = 40
+header_footer_min_repeat = 3
+header_footer_zone_lines = 20
+
+[model]
+enabled = true
+# 省略时依次尝试 RUMMAGE_MODEL_DIR、exe目录\models\bge-small-zh-v1.5
+# dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
+file = "model.onnx"
+batch_size = 32
+max_length = 512
+
+[rerank]
+# 可选：用 EmbeddingGemma 2 对基础排序的前 top_n 个文件做二次排序。
+# 默认关闭；关闭时不加载模型、不生成重排向量、检索行为与原来完全一致。
+# 打开后需要约 300MB 的量化 ONNX 模型和 tokenizer.json；首次索引会明显变慢。
+enabled = false
+# 省略时依次尝试 RUMMAGE_RERANK_MODEL_DIR、exe目录\models\embeddinggemma-2
+# dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
+# 相对 dir 的 ONNX 路径；HF 导出目录通常是 onnx/model_quantized.onnx
+file = "onnx/model_quantized.onnx"
+# 只重排基础排序的前几个文件；后面的名次保持不变
+top_n = 5
+# Gemma 分数的混合权重：0 等于不重排，1 等于完全按 Gemma 排序
+weight = 0.5
+batch_size = 16
+max_length = 1024
+
+# 目录局部规则
+# 在被监控的任意子目录里新建 .rummage.toml，该子树就完全改用它的规则，
+# 不再继承上面的 [index] extensions、[include]、[ignore]；内置忽略项始终生效。
+# 局部文件只允许下面三段，未写的段取默认值（md/markdown/docx/pdf/ofd、全部收录、仅内置忽略）。
+# 例：D:\docs\归档\.rummage.toml
+#   [index]
+#   extensions = ["md", "txt"]
+#   [include]
+#   patterns = ["2024*"]
+#   [ignore]
+#   dirs = ["drafts*"]
+# 增删改规则文件会立即重扫该目录，无需重启。
