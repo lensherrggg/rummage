@@ -223,7 +223,13 @@ impl IndexEngine {
 
         let (model, model_status) = if cfg.model.enabled {
             let loaded = environment.as_ref().map(|env| {
-                Embedder::load(env, &model_dir, &cfg.model.file, cfg.model.max_length)
+                Embedder::load(
+                    env,
+                    &model_dir,
+                    &cfg.model.file,
+                    cfg.model.tokenizer_dir.as_deref(),
+                    cfg.model.max_length,
+                )
             });
             match loaded {
                 Some(Ok(m)) => (Some(m), ModelStatus::Ready { dims: 0 }),
@@ -252,7 +258,13 @@ impl IndexEngine {
 
         let (rerank_model, rerank_status) = if cfg.rerank.enabled {
             let loaded = environment.as_ref().map(|env| {
-                GemmaEmbedder::load(env, &rerank_dir, &cfg.rerank.file, cfg.rerank.max_length)
+                GemmaEmbedder::load(
+                    env,
+                    &rerank_dir,
+                    &cfg.rerank.file,
+                    cfg.rerank.tokenizer_dir.as_deref(),
+                    cfg.rerank.max_length,
+                )
             });
             match loaded {
                 Some(Ok(m)) => {

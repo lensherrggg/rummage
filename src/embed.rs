@@ -34,6 +34,7 @@ impl Embedder {
         env: &Environment,
         dir: &Path,
         onnx_file: &str,
+        tokenizer_dir: Option<&Path>,
         max_length: usize,
     ) -> Result<Self> {
         let onnx_path = dir.join(onnx_file);
@@ -43,6 +44,8 @@ impl Embedder {
                 onnx_path.display()
             );
         }
+        // tokenizer 文件默认与 ONNX 同目录；`[model] tokenizer_dir` 可把两者分开。
+        let tokenizer_dir = tokenizer_dir.unwrap_or(dir);
         let required = [
             "tokenizer.json",
             "config.json",
@@ -50,19 +53,22 @@ impl Embedder {
             "tokenizer_config.json",
         ];
         for name in required {
-            let path = dir.join(name);
+            let path = tokenizer_dir.join(name);
             if !path.is_file() {
-                bail!("模型文件缺失：{}", path.display());
+                bail!(
+                    "模型文件缺失：{}（可用 [model] tokenizer_dir 单独指定 tokenizer 目录）",
+                    path.display()
+                );
             }
         }
 
         let onnx = std::fs::read(&onnx_path)
             .with_context(|| format!("读取模型失败：{}", onnx_path.display()))?;
         let tokenizer_files = TokenizerFiles {
-            tokenizer_file: std::fs::read(dir.join("tokenizer.json"))?,
-            config_file: std::fs::read(dir.join("config.json"))?,
-            special_tokens_map_file: std::fs::read(dir.join("special_tokens_map.json"))?,
-            tokenizer_config_file: std::fs::read(dir.join("tokenizer_config.json"))?,
+            tokenizer_file: std::fs::read(tokenizer_dir.join("tokenizer.json"))?,
+            config_file: std::fs::read(tokenizer_dir.join("config.json"))?,
+            special_tokens_map_file: std::fs::read(tokenizer_dir.join("special_tokens_map.json"))?,
+            tokenizer_config_file: std::fs::read(tokenizer_dir.join("tokenizer_config.json"))?,
         };
         let size = onnx.len() as u64;
 

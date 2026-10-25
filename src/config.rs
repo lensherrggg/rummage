@@ -247,6 +247,8 @@ impl Default for NormalizeConfig {
 pub struct ModelConfig {
     pub enabled: bool,
     pub dir: Option<PathBuf>,
+    /// tokenizer 文件所在目录；缺省时与 `dir` 相同。
+    pub tokenizer_dir: Option<PathBuf>,
     pub file: String,
     pub batch_size: usize,
     pub max_length: usize,
@@ -257,6 +259,7 @@ impl Default for ModelConfig {
         Self {
             enabled: true,
             dir: None,
+            tokenizer_dir: None,
             file: "model.onnx".to_string(),
             batch_size: 32,
             max_length: 512,
@@ -270,6 +273,8 @@ impl Default for ModelConfig {
 pub struct RerankConfig {
     pub enabled: bool,
     pub dir: Option<PathBuf>,
+    /// tokenizer 文件所在目录；缺省时与 `dir` 相同。
+    pub tokenizer_dir: Option<PathBuf>,
     /// 相对 `dir` 的 ONNX 路径；HF 导出的目录结构通常是 `onnx/model_quantized.onnx`。
     pub file: String,
     pub top_n: usize,
@@ -284,6 +289,7 @@ impl Default for RerankConfig {
         Self {
             enabled: false,
             dir: None,
+            tokenizer_dir: None,
             file: "onnx/model_quantized.onnx".to_string(),
             top_n: 5,
             weight: 0.5,
@@ -308,7 +314,7 @@ impl Config {
             }
         };
 
-        let (config, base) = match &path {
+        let (mut config, base) = match &path {
             Some(p) => {
                 if required && !p.is_file() {
                     bail!("配置文件不存在：{}", p.display());
@@ -327,8 +333,23 @@ impl Config {
             None => (Config::default(), cwd.clone()),
         };
 
+        config.resolve_tokenizer_dirs(&base);
         config.validate()?;
         Ok(LoadedConfig { config, path, base })
+    }
+
+    /// `tokenizer_dir` 的相对路径按配置文件所在目录解析；之后各调用方只看到绝对路径。
+    fn resolve_tokenizer_dirs(&mut self, base: &Path) {
+        for dir in [
+            &mut self.model.tokenizer_dir,
+            &mut self.rerank.tokenizer_dir,
+        ] {
+            if let Some(path) = dir {
+                if !path.is_absolute() {
+                    *path = base.join(&*path);
+                }
+            }
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -1292,6 +1313,30 @@ mod tests {
         bad = Config::default();
         bad.rerank.batch_size = 0;
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn tokenizer_dir_is_optional_and_resolves_relative_to_config() {
+        let cfg = Config::default();
+        assert!(cfg.model.tokenizer_dir.is_none());
+        assert!(cfg.rerank.tokenizer_dir.is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let abs = dir.path().join("abs-tokenizer");
+        let text = format!(
+            "[model]\ndir = \"bge\"\ntokenizer_dir = \"tok/bge\"\n\
+             [rerank]\nenabled = true\ndir = \"gemma\"\ntokenizer_dir = {:?}\n",
+            abs.to_string_lossy()
+        );
+        let path = dir.path().join("rummage.toml");
+        std::fs::write(&path, text).unwrap();
+
+        let loaded = Config::load(Some(&path)).unwrap();
+        assert_eq!(
+            loaded.config.model.tokenizer_dir,
+            Some(dir.path().join("tok").join("bge"))
+        );
+        assert_eq!(loaded.config.rerank.tokenizer_dir, Some(abs));
     }
 
     #[test]

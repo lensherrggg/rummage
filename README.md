@@ -64,7 +64,7 @@ D:\tools\rummage\
         └── dict.txt
 ```
 
-模型文件来自 `Xenova/bge-small-zh-v1.5` 的 ONNX 导出，五个文件缺一不可。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录。
+模型文件来自 `Xenova/bge-small-zh-v1.5` 的 ONNX 导出，五个文件缺一不可。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录。这五个文件默认必须在同一个目录；如果 ONNX 和 tokenizer 分开存放，用 `[model] tokenizer_dir` 指向 tokenizer 目录，ONNX 仍从 `dir` 读取。
 
 ### 显式下载模型
 
@@ -122,7 +122,7 @@ D:\tools\rummage\rummage.exe --dir D:\docs
 dir = "E:\\models\\bge-small-zh-v1.5"
 ```
 
-查找顺序：`[model] dir` → 环境变量 `RUMMAGE_MODEL_DIR` → `exe目录\models\bge-small-zh-v1.5`。
+查找顺序：`[model] dir` → 环境变量 `RUMMAGE_MODEL_DIR` → `exe目录\models\bge-small-zh-v1.5`。tokenizer 文件（`tokenizer.json` / `config.json` / `special_tokens_map.json` / `tokenizer_config.json`）默认从模型目录读取；需要分开存放时加 `[model] tokenizer_dir`，相对路径按配置文件所在目录解析。
 
 如果还要启用可选的二次重排（默认关闭），再把 EmbeddingGemma 2 的导出放到 `models\embeddinggemma-2\`：
 
@@ -135,7 +135,7 @@ D:\tools\rummage\
         └── tokenizer.json
 ```
 
-重排模型的查找顺序是 `[rerank] dir` → 环境变量 `RUMMAGE_RERANK_MODEL_DIR` → `exe目录\models\embeddinggemma-2`。不启用重排时，这个目录不存在也没关系。
+重排模型的查找顺序是 `[rerank] dir` → 环境变量 `RUMMAGE_RERANK_MODEL_DIR` → `exe目录\models\embeddinggemma-2`。不启用重排时，这个目录不存在也没关系。`tokenizer.json` 默认与 ONNX 同目录；分开存放时用 `[rerank] tokenizer_dir` 指定。
 
 要求：Windows 11 x64，无需安装 Python、Rust 或 GPU。ONNX Runtime 已静态链接进 exe；Windows 11 自带的 `DirectML.dll` 会被导入，系统目录中已存在，无需另行分发。
 
@@ -444,6 +444,7 @@ header_footer_zone_lines = 20
 [model]
 enabled = true                    # false = 只建关键词索引，状态栏显示“已禁用”
 dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\bge-small-zh" # 缺省与 dir 相同
 file = "model.onnx"
 batch_size = 32                   # 每批嵌入的文档块数
 max_length = 512                  # 分词最大长度
@@ -451,6 +452,7 @@ max_length = 512                  # 分词最大长度
 [rerank]
 enabled = false                   # 可选二次重排，默认关闭
 dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\gemma" # 缺省与 dir 相同
 file = "onnx/model_quantized.onnx" # 相对 dir 的 ONNX 路径
 top_n = 5                         # 只重排基础排序的前 N 个文件
 weight = 0.5                      # Gemma 分数权重；0 等于不重排，1 等于完全按 Gemma 排
@@ -710,6 +712,7 @@ cargo build --release --no-default-features
 | 提示 `监控目录不存在或不可访问` | `--dir` 路径写错，或网络盘未挂载 |
 | 提示配置文件不存在 / 解析失败 | `--config` 路径写错，或 TOML 语法错误（注意 Windows 路径要写双反斜杠） |
 | 状态栏 `模型: 未就绪(仅关键词)` | 模型目录里缺文件或 `model.onnx` 损坏。按 1.1 的五个文件核对；最底下一行红字有具体原因。检索仍可用，只是没有语义能力 |
+| tokenizer 文件和 ONNX 不想放一起 | 在 `[model]` / `[rerank]` 写 `tokenizer_dir` 指向 tokenizer 所在目录；相对路径按配置文件目录解析，缺省时仍用模型目录 |
 | 状态栏 `重排: 未就绪` | 只影响可选的二次重排：检查 `[rerank] dir` / `file` 与 `tokenizer.json` 是否存在；基础关键词+语义检索不受影响。最底下一行红字有具体原因 |
 | 启用重排后首次索引很慢 | 重排模型要为每个文件再算一遍分块向量，耗时约为仅主模型的数倍；完成后按哈希与已有向量续跑，后续启动不会重算 |
 | 状态栏 `监控: 未运行` | 文件监听启动失败（多为权限或路径问题）。检索可用，增删改需重启程序才生效；最底下一行红字给出原因 |
@@ -835,6 +838,7 @@ tests/               模型端到端、监控集成测试
 - **索引快照版本**：首版快照格式带版本号，不兼容时自动重建；SQLite schema 同样有版本校验。
 - **状态栏降级**：监控启动失败时仍可检索，状态栏显示“未运行”并在错误区给出原因；模型不可用时显示“未就绪(仅关键词)”。
 - **检索规模可配置**：需求固定“Top 50 候选、最多 10 条结果”，现改为 `[search] candidates` / `results`，默认值保持 50 / 10；另增命令行 `--ignore`，便于临时排除目录或文件。
+- **tokenizer 目录可分离**：`[model] tokenizer_dir` / `[rerank] tokenizer_dir` 允许 ONNX 与 tokenizer 文件分目录存放，缺省仍与模型目录相同；相对路径按配置文件所在目录解析。
 - **目录局部规则**：需求之外增加了 `.rummage.toml`，允许按目录覆盖 `extensions` / `include` / `ignore`；内置忽略项与 `[normalize]` 仍全局生效。
 - **docx / pdf / ofd 直接索引**：需求之外的格式扩展。docx 解包正文 XML 取文字；pdf 只读文字层；ofd 按国标容器读取页面 `TextCode`，页序以 `Document.xml` 为准。无文字层（扫描件、纯图片页）按“不用管”直接跳过，不引入 OCR，也不依赖外部程序或 DLL。
 - **PDF 中文字体编码**：内置解析器原本只认 `Identity-H`，遇到 `UniGB-UCS2-H` / `GBK-EUC-H` 会直接 panic。现用仓库内 vendored 版本补上这几类预定义 CMap 的直接解码，并把逐份提取改为逐页提取：损坏页计入跳过，其余页文字保留，解析器 panic 不再打印到终端。

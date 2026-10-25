@@ -84,6 +84,8 @@ header_footer_zone_lines = 20
 enabled = true
 # 省略时依次尝试 RUMMAGE_MODEL_DIR、exe目录\models\bge-small-zh-v1.5
 # dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
+# tokenizer 文件单独存放时指定；省略则与 dir 相同
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\bge-small-zh"
 file = "model.onnx"
 batch_size = 32
 max_length = 512
@@ -95,6 +97,8 @@ max_length = 512
 enabled = false
 # 省略时依次尝试 RUMMAGE_RERANK_MODEL_DIR、exe目录\models\embeddinggemma-2
 # dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
+# tokenizer 文件单独存放时指定；省略则与 dir 相同
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\gemma"
 # 相对 dir 的 ONNX 路径；HF 导出目录通常是 onnx/model_quantized.onnx
 file = "onnx/model_quantized.onnx"
 # 只重排基础排序的前几个文件；后面的名次保持不变

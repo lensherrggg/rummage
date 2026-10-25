@@ -27,6 +27,7 @@ impl GemmaEmbedder {
         env: &Environment,
         dir: &Path,
         onnx_file: &str,
+        tokenizer_dir: Option<&Path>,
         max_length: usize,
     ) -> Result<Self> {
         let onnx_path = dir.join(onnx_file);
@@ -36,9 +37,12 @@ impl GemmaEmbedder {
                 onnx_path.display()
             );
         }
-        let tokenizer_path = dir.join("tokenizer.json");
+        let tokenizer_path = tokenizer_dir.unwrap_or(dir).join("tokenizer.json");
         if !tokenizer_path.is_file() {
-            bail!("重排模型文件缺失：{}", tokenizer_path.display());
+            bail!(
+                "重排模型文件缺失：{}（可用 [rerank] tokenizer_dir 单独指定 tokenizer 目录）",
+                tokenizer_path.display()
+            );
         }
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
