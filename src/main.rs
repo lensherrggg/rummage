@@ -40,17 +40,17 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
-    /// 下载 bge 嵌入模型和/或 OCR 模型到 models 目录
+    /// 下载 bge 嵌入模型（可选 bge-base）和/或 OCR 模型到 models 目录
     Download(DownloadArgs),
 }
 
 #[derive(Debug, Args)]
 struct DownloadArgs {
-    /// 模型根目录（包含 bge-small-zh-v1.5 和 ocr 两个子目录）；默认 exe 同目录 models
+    /// 模型根目录（包含 bge-small-zh-v1.5 / bge-base-zh-v1.5 / ocr）；默认 exe 同目录 models
     #[arg(long = "dir", value_name = "DIR")]
     dir: Option<PathBuf>,
 
-    /// 只下载 bge / ocr；可逗号分隔，默认 all
+    /// 只下载 bge / bge-base / ocr；可逗号分隔，默认 all（bge + ocr，不含 bge-base）
     #[arg(long = "only", default_value = "all", value_name = "LIST")]
     only: String,
 
@@ -187,49 +187,30 @@ fn download_models(args: &DownloadArgs) -> Result<()> {
         .dir
         .clone()
         .unwrap_or_else(|| models_dir().unwrap_or_else(|_| PathBuf::from("models")));
-    let bge_dir = base.join("bge-small-zh-v1.5");
     let ocr_dir = base.join("ocr");
 
     println!("模型目录：{}", base.display());
-    if only.0 {
-        println!("下载 bge-small-zh-v1.5 → {}", bge_dir.display());
-        let files = [
-            DownloadFile {
-                remote: "config.json",
-                local: "config.json",
-                min_bytes: 100,
-            },
-            DownloadFile {
-                remote: "onnx/model.onnx",
-                local: "model.onnx",
-                min_bytes: 50 * 1024 * 1024,
-            },
-            DownloadFile {
-                remote: "special_tokens_map.json",
-                local: "special_tokens_map.json",
-                min_bytes: 10,
-            },
-            DownloadFile {
-                remote: "tokenizer.json",
-                local: "tokenizer.json",
-                min_bytes: 100_000,
-            },
-            DownloadFile {
-                remote: "tokenizer_config.json",
-                local: "tokenizer_config.json",
-                min_bytes: 100,
-            },
-        ];
-        for file in &files {
-            let url = format!(
-                "{}/Xenova/bge-small-zh-v1.5/resolve/main/{}",
-                args.hf_base.trim_end_matches('/'),
-                file.remote
-            );
-            download_file(&url, &bge_dir, file, args.force)?;
-        }
+    if only.small {
+        download_bge(
+            &base,
+            "bge-small-zh-v1.5",
+            "onnx/model.onnx",
+            "model.onnx",
+            50 * 1024 * 1024,
+            args,
+        )?;
     }
-    if only.1 {
+    if only.base {
+        download_bge(
+            &base,
+            "bge-base-zh-v1.5",
+            "onnx/model.onnx",
+            "model.onnx",
+            200 * 1024 * 1024,
+            args,
+        )?;
+    }
+    if only.ocr {
         println!("下载 PP-OCRv4 → {}", ocr_dir.display());
         let files = [
             DownloadFile {
@@ -259,26 +240,84 @@ fn download_models(args: &DownloadArgs) -> Result<()> {
     Ok(())
 }
 
-/// (bge, ocr)
-fn parse_only(value: &str) -> Result<(bool, bool)> {
-    let mut bge = false;
-    let mut ocr = false;
+fn download_bge(
+    base: &Path,
+    repo: &str,
+    remote_onnx: &'static str,
+    local_onnx: &'static str,
+    onnx_min_bytes: u64,
+    args: &DownloadArgs,
+) -> Result<()> {
+    let dir = base.join(repo);
+    println!("下载 {repo} → {}", dir.display());
+    let files = [
+        DownloadFile {
+            remote: "config.json",
+            local: "config.json",
+            min_bytes: 100,
+        },
+        DownloadFile {
+            remote: remote_onnx,
+            local: local_onnx,
+            min_bytes: onnx_min_bytes,
+        },
+        DownloadFile {
+            remote: "special_tokens_map.json",
+            local: "special_tokens_map.json",
+            min_bytes: 10,
+        },
+        DownloadFile {
+            remote: "tokenizer.json",
+            local: "tokenizer.json",
+            min_bytes: 100_000,
+        },
+        DownloadFile {
+            remote: "tokenizer_config.json",
+            local: "tokenizer_config.json",
+            min_bytes: 100,
+        },
+    ];
+    for file in &files {
+        let url = format!(
+            "{}/Xenova/{repo}/resolve/main/{}",
+            args.hf_base.trim_end_matches('/'),
+            file.remote
+        );
+        download_file(&url, &dir, file, args.force)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OnlyModels {
+    small: bool,
+    base: bool,
+    ocr: bool,
+}
+
+fn parse_only(value: &str) -> Result<OnlyModels> {
+    let mut only = OnlyModels {
+        small: false,
+        base: false,
+        ocr: false,
+    };
     for part in value.split(',') {
         match part.trim().to_ascii_lowercase().as_str() {
             "" => {}
             "all" => {
-                bge = true;
-                ocr = true;
+                only.small = true;
+                only.ocr = true;
             }
-            "bge" | "embedding" | "semantic" => bge = true,
-            "ocr" => ocr = true,
-            other => bail!("--only 只支持 bge / ocr / all，收到：{other}"),
+            "bge" | "embedding" | "semantic" => only.small = true,
+            "bge-base" | "base" => only.base = true,
+            "ocr" => only.ocr = true,
+            other => bail!("--only 只支持 bge / bge-base / ocr / all，收到：{other}"),
         }
     }
-    if !bge && !ocr {
-        bail!("--only 至少要包含 bge 或 ocr");
+    if !only.small && !only.base && !only.ocr {
+        bail!("--only 至少要包含 bge、bge-base 或 ocr");
     }
-    Ok((bge, ocr))
+    Ok(only)
 }
 
 fn models_dir() -> Result<PathBuf> {
@@ -298,8 +337,10 @@ fn download_file(url: &str, dir: &Path, file: &DownloadFile, force: bool) -> Res
             }
         }
     }
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("创建模型目录失败：{}", dir.display()))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建模型目录失败：{}", parent.display()))?;
+    }
     println!("  下载：{url}");
     let mut response = ureq::get(url)
         .call()
@@ -337,11 +378,45 @@ mod tests {
 
     #[test]
     fn only_parser_accepts_aliases_and_rejects_empty() {
-        assert_eq!(parse_only("all").unwrap(), (true, true));
-        assert_eq!(parse_only("bge").unwrap(), (true, false));
-        assert_eq!(parse_only("ocr").unwrap(), (false, true));
-        assert_eq!(parse_only("bge,ocr").unwrap(), (true, true));
-        assert_eq!(parse_only("semantic").unwrap(), (true, false));
+        let small = OnlyModels {
+            small: true,
+            base: false,
+            ocr: false,
+        };
+        assert_eq!(
+            parse_only("all").unwrap(),
+            OnlyModels {
+                small: true,
+                base: false,
+                ocr: true
+            }
+        );
+        assert_eq!(parse_only("bge").unwrap(), small);
+        assert_eq!(parse_only("semantic").unwrap(), small);
+        assert_eq!(
+            parse_only("bge-base").unwrap(),
+            OnlyModels {
+                small: false,
+                base: true,
+                ocr: false
+            }
+        );
+        assert_eq!(
+            parse_only("base,ocr").unwrap(),
+            OnlyModels {
+                small: false,
+                base: true,
+                ocr: true
+            }
+        );
+        assert_eq!(
+            parse_only("bge,bge-base,ocr").unwrap(),
+            OnlyModels {
+                small: true,
+                base: true,
+                ocr: true
+            }
+        );
         assert!(parse_only("").is_err());
         assert!(parse_only("docx").is_err());
     }

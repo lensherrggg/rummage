@@ -93,6 +93,7 @@ fn run(
         indexing: true,
         progress: None,
         last_error: None,
+        notice: None,
     };
     let _ = ui_tx.send(UiMsg::Status(loading));
 
@@ -112,6 +113,7 @@ fn run(
                 indexing: false,
                 progress: None,
                 last_error: Some(err.to_string()),
+                notice: None,
             }));
             return;
         }
@@ -166,6 +168,8 @@ fn run(
                     Ok(hits) => {
                         let _ = reply.send(hits.clone());
                         let _ = ui_tx.send(UiMsg::QueryResult { id, hits });
+                        // 检索会刷新索引的“最近使用”并清掉闲置提示。
+                        let _ = ui_tx.send(UiMsg::Status(engine.status(engine.has_pending_work())));
                     }
                     Err(err) => {
                         let msg = format!("检索失败：{err}");
@@ -215,25 +219,6 @@ fn run(
                         engine.note_error(msg.clone());
                         let _ = ui_tx.send(UiMsg::Error(msg));
                     }
-                }
-                let _ = ui_tx.send(UiMsg::Status(
-                    engine.status(engine.has_pending_work()),
-                ));
-            }
-        } else if engine.has_pending_rerank() {
-            if let Some(batch) = engine.next_rerank_batch() {
-                if let Err(err) = engine
-                    .embed_rerank_documents_cancellable(&batch, || stop.load(Ordering::Relaxed))
-                {
-                    let msg = format!("重排索引失败：{err}");
-                    engine.note_error(msg.clone());
-                    let _ = ui_tx.send(UiMsg::Error(msg));
-                } else if stop.load(Ordering::Relaxed) {
-                    continue;
-                } else if let Err(err) = engine.persist() {
-                    let msg = format!("索引落盘失败：{err}");
-                    engine.note_error(msg.clone());
-                    let _ = ui_tx.send(UiMsg::Error(msg));
                 }
                 let _ = ui_tx.send(UiMsg::Status(
                     engine.status(engine.has_pending_work()),

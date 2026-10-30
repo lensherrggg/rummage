@@ -37,14 +37,9 @@ Rummage 是一个 Windows 本地文档混合检索 TUI：
         ┌─────────────┼────────────────┐
         │             │                │
   ┌─────▼─────┐ ┌─────▼─────┐  ┌──────▼──────┐
-  │ SQLite    │ │ index.bin │  │ rerank.bin  │
-  │ 文件/文本 │ │ BM25+向量 │  │ Gemma 向量  │
+  │ SQLite    │ │ index.bin │  │ ocr-cache/  │
+  │ 文件/文本 │ │ BM25+向量 │  │ 按页 OCR    │
   └───────────┘ └───────────┘  └─────────────┘
-                      │
-              ┌───────▼────────┐
-              │ ocr-cache/     │
-              │ 按页 OCR 文本  │
-              └────────────────┘
 ```
 
 主线程只负责 TUI；索引、OCR、嵌入、重排都在 worker 线程中执行。TUI 退出时 `IndexHandle::shutdown()` 设置停止标志并等待 worker 落盘退出。
@@ -58,8 +53,8 @@ Rummage 是一个 Windows 本地文档混合检索 TUI：
 | `src/engine.rs` | 目录扫描、增量更新、文本索引、BM25+向量检索、RRF、rerank、快照协调 |
 | `src/extract.rs` | docx/pdf/ofd/纯文本提取；PDF 逐页 `catch_unwind`；无文字层页 OCR 回退 |
 | `src/ocr.rs` | PDFium 渲染、RapidOCR/PP-OCRv4 ONNX、页级缓存、OCR 状态 |
-| `src/embed.rs` | bge-small-zh-v1.5 ONNX 嵌入 |
-| `src/rerank.rs` | 可选 EmbeddingGemma 2 重排与持久化 |
+| `src/embed.rs` | bge 句向量 ONNX 嵌入（bge-small / bge-base，CLS 池化） |
+| `src/rerank.rs` | 可选 bge-reranker 交叉编码器重排：配对打分与混合排序 |
 | `src/store.rs` | SQLite `files`/`meta`，文件哈希、mtime、归一化文本、嵌入状态 |
 | `src/persist.rs` | `index.bin` 快照的临时文件 + fsync + rename 原子读写 |
 | `src/watcher.rs` | notify 文件事件 + 防抖 + 局部规则变化重扫 |
@@ -78,7 +73,7 @@ Rummage 是一个 Windows 本地文档混合检索 TUI：
 1. `walkdir` 遍历所有 `[watch] roots`，排除索引目录、内置忽略项、局部规则/扩展名不匹配的文件。
 2. 对每个文件先取 `metadata`：`mtime_ns` 和 `size`。
 3. 查 SQLite 中同一路径的旧记录：
-   - `mtime_ns + size` 相同：**快速路径**，不读文件、不算哈希，只补齐缺失的嵌入/重排队列。
+   - `mtime_ns + size` 相同：**快速路径**，不读文件、不算哈希，只补齐缺失的嵌入队列。
    - 不同：读文件，算 `blake3`。
      - 哈希相同：只更新 SQLite 的 `mtime/size`，不重新提取。
      - 哈希不同：重新提取、归一化、切块、更新索引。
@@ -134,7 +129,7 @@ OCR 管线（`src/ocr.rs`）：
 - 归一化：控制字符、全角/半角、OCR 硬换行、页码/页眉页脚、Markdown 标记等
 - 切块：约 1024 字节 / 128 字节重叠
 - SQLite `files` 保存路径、hash、mtime、size、归一化全文、块数、是否已嵌入
-- `index.bin` 保存 BM25 倒排 + 向量图；`rerank.bin` 保存可选 Gemma 向量
+- `index.bin` 保存 BM25 倒排 + 向量图；重排模型不落盘任何数据
 - 快照采用 `tmp + fsync + rename`，避免半写损坏
 
 ## 5. 检索流程
@@ -147,7 +142,7 @@ OCR 管线（`src/ocr.rs`）：
 → 加权 RRF 融合（默认 k=60，两路等权；可配置）
 → 按文件取最高分、去重
 → 截断到 [search] results
-→ 可选 Gemma 对前 [rerank] top_n 名重排
+→ 可选 bge-reranker 对前 [rerank] top_n 名文件的候选块做配对打分并混合
 → TUI 结果列表
 ```
 
@@ -164,7 +159,7 @@ OCR 管线（`src/ocr.rs`）：
 - worker 线程拥有 `IndexEngine`；TUI 通过 mpsc 发送 Query/FileEvents/Shutdown
 - `IndexHandle.stop` 是原子停止标志：
   - 扫描每文件前检查
-  - 嵌入/重排每个小批前检查（`embed_documents_cancellable`）
+  - 嵌入每个小批前检查（`embed_documents_cancellable`）
   - 退出时停止调度，当前小批完成后落盘并结束
 - OCR 在扫描线程内同步执行；模型懒加载，加载/识别期间状态为 `加载中/识别中`
 - 退出时先 `watcher.stop()`，再 `index.shutdown()`，最后写日志 `退出`
@@ -174,7 +169,7 @@ OCR 管线（`src/ocr.rs`）：
 - 输入框 / 结果列表 / 详情叠层
 - `q` 在查询框是普通字符；`Esc` 关详情或退出；`Ctrl+C` 立即退出
 - 状态栏：监控、索引文件数与阶段百分比、模型、重排、OCR（`就绪·GPU` / `就绪·CPU`）、焦点、页
-- 状态栏下方固定一行消息区，错误/提示独占整行；窄屏不再把红字挤在状态栏右侧
+- 状态栏下方固定一行消息区，错误/提示独占整行；红字为错误，黄字为提示（如索引超过 30 天未检索、建议删除）
 - 80 列窄屏且 OCR 启用时省略“焦点”字段，优先保留 OCR 和页码；OCR 字段用 `OCR:就绪·GPU` 紧凑写法
 - 结果页按当前可见行数动态计算；无结果不显示页信息
 - 详情层展示最佳匹配块；同文件分数 ≥ 最佳分 × `related_ratio` 的其他片段列在“其他相关片段”，最多 `related_chunks` 个
@@ -219,12 +214,14 @@ min_text_chars = 20
 
 [model]
 enabled = true
+dir = "D:\\Tools\\models\\bge-small-zh-v1.5"   # 换 bge-base 时改这里
 batch_size = 32
 
 [rerank]
 enabled = false
 top_n = 5
-weight = 0.5
+chunks = 3
+weight = 0.75
 ```
 
 目录局部 `.rummage.toml` 可覆盖 `[index] extensions` / `[include]` / `[ignore]`；内置忽略项和 `[normalize]` 仍全局生效。`[index] textless_pdf` 和 `[ocr]` 属于全局策略，不由局部规则覆盖。
@@ -238,7 +235,7 @@ D:\tools\rummage-portable-0.1.0-full\
 ├── pdfium.dll
 ├── models\
 │   ├── bge-small-zh-v1.5\
-│   ├── embeddinggemma-2\        # 可选
+│   ├── bge-reranker-base\       # 可选
 │   └── ocr\
 │       ├── det.onnx
 │       ├── rec.onnx
@@ -252,7 +249,7 @@ D:\tools\rummage-portable-0.1.0-full\
 └── start.bat
 ```
 
-更新部署时只替换 `rummage.exe`、`README.md`、`pdfium.dll` 和 `models\ocr\`；不要覆盖 `rummage.toml`、`docs\`、`index\`、已有 bge/Gemma 模型。
+更新部署时只替换 `rummage.exe`、`README.md`、`pdfium.dll` 和 `models\ocr\`；不要覆盖 `rummage.toml`、`docs\`、`index\`、已有 bge/reranker 模型。
 
 ## 11. 评测工具与质量基线
 
@@ -265,7 +262,7 @@ D:\tools\rummage-portable-0.1.0-full\
 
 ## 12. 验证与性能基线
 
-- 单元测试：138 个（`cargo test --offline`）
+- 单元测试：144 个（`cargo test --offline`）
 - 监控集成测试：2 个
 - PDF 加固：594 页机考 PDF 由 5 页 panic 降为 0；109 份高风险样本逐页 0 panic（3 条文件级 xref/trailer 损坏仍需专门修复）
 - OCR 选型：合成 11 页 + 真实 8 页；RapidOCR 准确率最高，Tesseract 次之，Windows OCR 快但表格顺序差且目标机可能无语言包

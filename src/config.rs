@@ -249,6 +249,7 @@ pub struct ModelConfig {
     pub dir: Option<PathBuf>,
     /// tokenizer 文件所在目录；缺省时与 `dir` 相同。
     pub tokenizer_dir: Option<PathBuf>,
+    /// 相对模型目录的 ONNX 路径。
     pub file: String,
     pub batch_size: usize,
     pub max_length: usize,
@@ -267,7 +268,7 @@ impl Default for ModelConfig {
     }
 }
 
-/// 可选的 EmbeddingGemma 2 二次重排：只调整基础排序的前 `top_n` 个文件。
+/// 可选的交叉编码器重排：只调整基础排序的前 `top_n` 个文件。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RerankConfig {
@@ -278,7 +279,9 @@ pub struct RerankConfig {
     /// 相对 `dir` 的 ONNX 路径；HF 导出的目录结构通常是 `onnx/model_quantized.onnx`。
     pub file: String,
     pub top_n: usize,
-    /// Gemma 分数在混合中的权重，0 等于不重排，1 等于完全按 Gemma 排序。
+    /// 每个候选文件送进交叉编码器的块数，取其中最高分作为文件分。
+    pub chunks: usize,
+    /// 重排分在混合中的权重，0 等于不重排，1 等于完全按重排分排序。
     pub weight: f64,
     pub batch_size: usize,
     pub max_length: usize,
@@ -292,9 +295,10 @@ impl Default for RerankConfig {
             tokenizer_dir: None,
             file: "onnx/model_quantized.onnx".to_string(),
             top_n: 5,
-            weight: 0.5,
+            chunks: 3,
+            weight: 0.75,
             batch_size: 16,
-            max_length: 1024,
+            max_length: 512,
         }
     }
 }
@@ -388,6 +392,9 @@ impl Config {
         if self.rerank.top_n == 0 {
             bail!("rerank.top_n 必须大于 0");
         }
+        if self.rerank.chunks == 0 {
+            bail!("rerank.chunks 必须大于 0");
+        }
         if !self.rerank.weight.is_finite() || !(0.0..=1.0).contains(&self.rerank.weight) {
             bail!("rerank.weight 必须在 0 和 1 之间");
         }
@@ -480,7 +487,7 @@ impl Config {
                 return PathBuf::from(dir);
             }
         }
-        default_model_dir("embeddinggemma-2")
+        default_model_dir("bge-reranker-base")
     }
 }
 
@@ -1289,20 +1296,25 @@ mod tests {
         let cfg = Config::default();
         assert!(!cfg.rerank.enabled);
         assert_eq!(cfg.rerank.top_n, 5);
-        assert!((cfg.rerank.weight - 0.5).abs() < f64::EPSILON);
+        assert_eq!(cfg.rerank.chunks, 3);
+        assert!((cfg.rerank.weight - 0.75).abs() < f64::EPSILON);
         assert!(cfg.validate().is_ok());
 
         let cfg: Config = toml::from_str(
-            "[rerank]\nenabled = true\ndir = \"models/gemma\"\ntop_n = 3\nweight = 0.7\n",
+            "[rerank]\nenabled = true\ndir = \"models/reranker\"\ntop_n = 3\nchunks = 1\nweight = 0.7\n",
         )
         .unwrap();
         assert!(cfg.rerank.enabled);
         assert_eq!(cfg.rerank.file, "onnx/model_quantized.onnx");
         assert_eq!(cfg.rerank.top_n, 3);
+        assert_eq!(cfg.rerank.chunks, 1);
         assert!(cfg.validate().is_ok());
 
         let mut bad = Config::default();
         bad.rerank.top_n = 0;
+        assert!(bad.validate().is_err());
+        bad = Config::default();
+        bad.rerank.chunks = 0;
         assert!(bad.validate().is_err());
         bad = Config::default();
         bad.rerank.weight = 1.5;
@@ -1316,6 +1328,26 @@ mod tests {
     }
 
     #[test]
+    fn model_dir_defaults_to_bge_small_and_file_is_configurable() {
+        let cfg = Config::default();
+        assert_eq!(cfg.model.file, "model.onnx");
+        assert!(cfg
+            .resolve_model_dir(Path::new("D:\\app"))
+            .ends_with(Path::new("models").join("bge-small-zh-v1.5")));
+
+        let cfg: Config = toml::from_str(
+            "[model]\ndir = \"D:\\\\models\\\\bge-base-zh-v1.5\"\nfile = \"onnx/model.onnx\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.model.dir.as_deref(), Some(Path::new("D:\\models\\bge-base-zh-v1.5")));
+        assert_eq!(cfg.model.file, "onnx/model.onnx");
+        assert_eq!(
+            cfg.resolve_model_dir(Path::new("D:\\app")),
+            Path::new("D:\\models\\bge-base-zh-v1.5")
+        );
+    }
+
+    #[test]
     fn tokenizer_dir_is_optional_and_resolves_relative_to_config() {
         let cfg = Config::default();
         assert!(cfg.model.tokenizer_dir.is_none());
@@ -1325,7 +1357,7 @@ mod tests {
         let abs = dir.path().join("abs-tokenizer");
         let text = format!(
             "[model]\ndir = \"bge\"\ntokenizer_dir = \"tok/bge\"\n\
-             [rerank]\nenabled = true\ndir = \"gemma\"\ntokenizer_dir = {:?}\n",
+             [rerank]\nenabled = true\ndir = \"reranker\"\ntokenizer_dir = {:?}\n",
             abs.to_string_lossy()
         );
         let path = dir.path().join("rummage.toml");

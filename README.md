@@ -36,7 +36,7 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "~$*"
 
 查询可混用过滤语法：`断行修复 dir:docs\ocr`、`会议纪要 name:2025`、`"合并硬换行"`。
 
-可选二次重排默认关闭；需要时把 EmbeddingGemma 2 放到 `models\embeddinggemma-2\`，在配置中写 `[rerank] enabled = true`，详见 §1.1 与 §3。完整说明见 §二、§三，部署到离线机器见 §六。
+可选二次重排默认关闭；需要时把 `bge-reranker-base` 放到 `models\bge-reranker-base\`，在配置中写 `[rerank] enabled = true`，详见 §1.1 与 §3。完整说明见 §二、§三，部署到离线机器见 §六。
 
 ---
 
@@ -52,27 +52,39 @@ D:\tools\rummage\
 ├── rummage-eval.exe        # 可选：离线检索质量评估
 ├── pdfium.dll              # 可选：扫描件 OCR 渲染
 └── models\
-    ├── bge-small-zh-v1.5\
+    ├── bge-small-zh-v1.5\  # 默认语义模型
     │   ├── model.onnx
     │   ├── tokenizer.json
     │   ├── config.json
     │   ├── special_tokens_map.json
     │   └── tokenizer_config.json
+    ├── bge-base-zh-v1.5\   # 可选：质量更好的语义模型（约 400MB）
+    │   ├── model.onnx
+    │   ├── tokenizer.json
+    │   ├── config.json
+    │   ├── special_tokens_map.json
+    │   └── tokenizer_config.json
+    ├── bge-reranker-base\  # 可选：二次重排（默认关闭）
+    │   ├── onnx\model_quantized.onnx
+    │   └── tokenizer.json
     └── ocr\                # 可选：扫描件 OCR 识别
         ├── det.onnx
         ├── rec.onnx
         └── dict.txt
 ```
 
-模型文件来自 `Xenova/bge-small-zh-v1.5` 的 ONNX 导出，五个文件缺一不可。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录。这五个文件默认必须在同一个目录；如果 ONNX 和 tokenizer 分开存放，用 `[model] tokenizer_dir` 指向 tokenizer 目录，ONNX 仍从 `dir` 读取。
+语义模型支持 `bge-small-zh-v1.5`（默认，约 95MB）和 `bge-base-zh-v1.5`（约 400MB，检索质量更好但建索引约 6 倍慢），两者都按 `<模型目录>\model.onnx` 布局，用 `[model] dir` 选择。模型文件来自对应的 Xenova ONNX 导出；至少需要 ONNX、`tokenizer.json`、`tokenizer_config.json`，`config.json` 用来读 pad id，`special_tokens_map.json` 可选，建议整套一起放。默认情况下程序**只在 exe 同目录**查找 `models\bge-small-zh-v1.5`，不看当前工作目录；ONNX 和 tokenizer 分开存放时用 `[model] tokenizer_dir` 指向 tokenizer 目录。
 
 ### 显式下载模型
 
 程序运行时不会自动联网。需要补齐模型时，在联网机器上显式执行：
 
 ```powershell
-# 下载 bge + OCR 到 exe 同目录 models
+# 下载 bge-small + OCR 到 exe 同目录 models
 rummage.exe models download
+
+# 只下 bge-base（质量模式，约 400MB）
+rummage.exe models download --only bge-base
 
 # 只下 OCR
 rummage.exe models download --only ocr
@@ -84,10 +96,10 @@ rummage.exe models download --dir E:\rummage-models
 rummage.exe models download --hf-base https://hf-mirror.com
 ```
 
-- 默认下载 bge-small-zh-v1.5 的 5 个文件和 PP-OCRv4 的 `det.onnx` / `rec.onnx` / `dict.txt`
+- 默认下载 bge-small-zh-v1.5 的 5 个文件和 PP-OCRv4 的 `det.onnx` / `rec.onnx` / `dict.txt`；`bge-base` 需显式指定
 - 已存在且大小合理的文件会跳过；`--force` 强制重下
-- `--only bge` / `--only ocr` / `--only all`
-- **不会**自动下载 PDFium、EmbeddingGemma 重排模型
+- `--only bge` / `--only bge-base` / `--only ocr` / `--only all`（all = bge-small + OCR）
+- **不会**自动下载 PDFium、`bge-reranker-base` 重排模型
 - 下载完成后把整个 `models\` 拷到离线机即可；离线机不需要运行这个命令
 
 目标机完全离线时，不要使用该命令，直接复制已下载的 `models\`。
@@ -124,18 +136,29 @@ dir = "E:\\models\\bge-small-zh-v1.5"
 
 查找顺序：`[model] dir` → 环境变量 `RUMMAGE_MODEL_DIR` → `exe目录\models\bge-small-zh-v1.5`。tokenizer 文件（`tokenizer.json` / `config.json` / `special_tokens_map.json` / `tokenizer_config.json`）默认从模型目录读取；需要分开存放时加 `[model] tokenizer_dir`，相对路径按配置文件所在目录解析。
 
-如果还要启用可选的二次重排（默认关闭），再把 EmbeddingGemma 2 的导出放到 `models\embeddinggemma-2\`：
+切换主模型只改 `dir`（两种模型都把 ONNX 放在目录根下）：
+
+```toml
+[model]
+dir = "D:\\Tools\\models\\bge-base-zh-v1.5"
+```
+
+如果手上的导出把 ONNX 放在 `onnx\` 子目录，再加一行 `file = "onnx/model.onnx"`。程序把 ONNX 文件、维度和大小写进模型标识，切换模型后语义索引会自动重建，不会混用旧向量。
+
+两种模型在 125 份 OFD、187 条手写查询上的离线评测（混合检索 Recall / MRR / nDCG）：bge-small 为 0.967 / 0.895 / 0.908，bge-base 为 0.984 / 0.910 / 0.923；代价是模型约 400MB、建索引耗时约为 bge-small 的 6 倍。
+
+如果还要启用可选的二次重排（默认关闭），再把 `bge-reranker-base` 的导出放到 `models\bge-reranker-base\`：
 
 ```text
 D:\tools\rummage\
 └── models\
-    └── embeddinggemma-2\
+    └── bge-reranker-base\
         ├── onnx\model_quantized.onnx
         ├── onnx\model_quantized.onnx_data   # 量化模型的外部权重，若有
         └── tokenizer.json
 ```
 
-重排模型的查找顺序是 `[rerank] dir` → 环境变量 `RUMMAGE_RERANK_MODEL_DIR` → `exe目录\models\embeddinggemma-2`。不启用重排时，这个目录不存在也没关系。`tokenizer.json` 默认与 ONNX 同目录；分开存放时用 `[rerank] tokenizer_dir` 指定。
+重排模型的查找顺序是 `[rerank] dir` → 环境变量 `RUMMAGE_RERANK_MODEL_DIR` → `exe目录\models\bge-reranker-base`。不启用重排时，这个目录不存在也没关系。`tokenizer.json` 默认与 ONNX 同目录；分开存放时用 `[rerank] tokenizer_dir` 指定。
 
 要求：Windows 11 x64，无需安装 Python、Rust 或 GPU。ONNX Runtime 已静态链接进 exe；Windows 11 自带的 `DirectML.dll` 会被导入，系统目录中已存在，无需另行分发。
 
@@ -173,10 +196,9 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "20??_归档
 2. 在**第一个根目录**下创建索引目录 `D:\docs\.rummage`（默认位置）。不想在被索引目录里产生文件时，用 `[index] dir` 指到别处，见[四、索引目录与维护](#四索引目录与维护)。
 3. 递归扫描全部根目录，状态栏文件数递增并显示 `· 扫描 NN%`。
 4. 对每个文件做归一化、切块、建关键词索引，再按每批 `[model] batch_size` 个块（默认 32）计算语义向量。首次索引耗时主要由这一步决定，文档越多越久；状态栏显示 `· 语义 NN%`。
-5. 如果启用了 `[rerank]`，再为每个文件计算一组重排向量并写入 `rerank.bin`；这一步比主模型更慢，首次启用会明显拉长索引时间；状态栏显示 `· 重排 NN%`。
-6. 索引落盘。扫描期间的查询会排队，扫描结束后立即处理。
+5. 索引落盘。扫描期间的查询会排队，扫描结束后立即处理。
 
-中途可以按 `Esc` 或 `Ctrl+C` 退出。退出时会先停止调度，不再开始新的文件或嵌入批次；正在计算的一小批完成后立即落盘并结束进程，已完成的索引会保存，下次启动从未完成的部分继续。把 `[model] batch_size` / `[rerank] batch_size` 调小可以让退出更快，但索引吞吐会下降。
+中途可以按 `Esc` 或 `Ctrl+C` 退出。退出时会先停止调度，不再开始新的文件或嵌入批次；正在计算的一小批完成后立即落盘并结束进程，已完成的索引会保存，下次启动从未完成的部分继续。把 `[model] batch_size` 调小可以让退出更快，但索引吞吐会下降。
 
 **启动后先确认状态栏主要字段**（终端至少 80×20）：
 
@@ -189,7 +211,7 @@ D:\tools\rummage\rummage.exe --dir D:\docs --ignore drafts --ignore "20??_归档
 ```
 
 - `监控: 运行中` —— 文件监听正常
-- `索引: N 文件` —— 已收录的文档数量；索引进行中会追加当前阶段与百分比，如 `· 扫描 67%`。`扫描` 期间查询要排队；`语义` / `重排` 期间可以正常检索
+- `索引: N 文件` —— 已收录的文档数量；索引进行中会追加当前阶段与百分比，如 `· 扫描 67%`。`扫描` 期间查询要排队；`语义` 期间可以正常检索
 - `模型: 就绪` —— 语义检索可用；若是 `未就绪(仅关键词)` 见[常见问题](#五常见问题)
 - `焦点: 查询` —— 键盘输入进入查询框
 - `页 1/2` —— 有结果时显示当前页/总页数；无结果时不显示
@@ -234,9 +256,9 @@ enabled = true
 dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
 
 [rerank]
-# 可选：EmbeddingGemma 2 二次重排，默认关闭
+# 可选：bge-reranker 交叉编码器二次重排，默认关闭
 enabled = false
-# dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
+# dir = "D:\\tools\\rummage\\models\\bge-reranker-base"
 ```
 
 启用重排时，把 `enabled` 改为 `true` 并确认模型目录；状态栏会多一项 `重排: 就绪`。
@@ -262,10 +284,11 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 - 未变化的文件按哈希跳过，不再解析、不再嵌入，启动只需数秒
 - 索引上次已落盘，模型与维度没变就原样复用；启动扫描只对 mtime/size 变化的文件重新读取和哈希
 - 扫描完成时日志会记录文件数、变更数和耗时，便于判断是目录遍历还是首次 OCR 占用了时间
-- 上次退出前没嵌入完的文件会自动续跑；重排向量同样续跑（`重排: 加载中` → `就绪`）
+- 上次退出前没嵌入完的文件会自动续跑（`模型: 加载中` → `就绪`）
 - 模型文件被移走或损坏时，自动降级为纯关键词检索，状态栏显示 `模型: 未就绪(仅关键词)`
 - 重排模型被移走或损坏时不影响基础检索，状态栏显示 `重排: 未就绪`，最底下一行红字给出原因
-- 关闭 `[rerank]` 后检索完全回到原来的排序，已有的 `rerank.bin` 保留，重新打开无需重算
+- 关闭 `[rerank]` 后检索完全回到原来的排序，不加载重排模型，也不影响已有语义索引
+- 索引超过 30 天没有被检索时，消息区用黄色提示 `索引已 N 天未检索；若不再使用可删除 <索引目录>`，避免旧模型/旧目录长期占用空间；检索一次后提示消失
 
 ---
 
@@ -289,7 +312,7 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 - 第一行：查询输入框，焦点在此时显示光标
 - 中间：结果列表，默认最多 10 条（由 `[search] results` 控制）；每条第一行是完整文件路径，第二行是**最佳匹配块**里的摘录，命中的词以黄色高亮，`>` 为当前选中项
 - 状态栏：监控/索引/模型/重排/OCR/焦点/页
-- 最底下一行：消息区，显示最近一次错误或提示（红字，整行宽度，不再和状态栏挤在一起）
+- 最底下一行：消息区，红字显示最近一次错误，黄字显示提示（如索引长期未使用、建议删除）；整行宽度，不再和状态栏挤在一起
 - 焦点切到结果列表时，结果区底部出现提示行 `c 复制路径   j/k 选择   Enter 详情   Tab 返回查询`
 - 在结果列表按 `Enter` 会叠一层详情：显示完整路径、关键词/语义名次、融合分、重排分与名次变化，以及最佳匹配块的全文；同一文件里分数达到阈值的其他片段也会列在“其他相关片段”下（命中词同样黄色高亮）；详情层内 `j`/`k` 滚动、`Esc` 关闭
 - 检索结果为空或尚未检索时：`输入查询后按 Enter 检索`
@@ -301,7 +324,7 @@ D:\tools\rummage\rummage.exe --config D:\tools\rummage\rummage.toml
 路径: D:\docs\断行修复笔记.md
 来源: 关键词第 1 位 + 语义第 2 位
 融合分: 0.0320（RRF，k=60）
-重排: 0.8123（权重 0.35，第 2 → 第 1 位）
+重排: 2.31（权重 0.75，第 2 → 第 1 位）
 
 最佳匹配片段
 合并硬换行的规则：段内单换行视为软换行，直接拼接；段落边界才保留…
@@ -357,14 +380,14 @@ Esc 关闭   j/k 滚动
 
 `candidates` 是**聚合前的分块候选数**，不是最终结果条数；调大能让更多文件进入融合与重排，但查询会略慢。`results` 才是结果列表显示的文件数上限。
 
-结果详情层（结果区按 `Enter`）把这条链路摊开：`来源` 是该文件在关键词、语义两路候选里各自的第一出现位置；`融合分` 在两路都可用时是 RRF 分，只有一路时显示该路原始分（BM25 或语义相似度）；`重排` 给出 Gemma 分数、配置权重和重排前后名次，只对前 `top_n` 名展示。原始分值受模式影响、彼此不可比，所以默认不放进结果列表，只在详情层用于排查排序。
+结果详情层（结果区按 `Enter`）把这条链路摊开：`来源` 是该文件在关键词、语义两路候选里各自的第一出现位置；`融合分` 在两路都可用时是 RRF 分，只有一路时显示该路原始分（BM25 或语义相似度）；`重排` 给出交叉编码器分数、配置权重和重排前后名次，只对前 `top_n` 名展示。原始分值受模式影响、彼此不可比，所以默认不放进结果列表，只在详情层用于排查排序。
 
 ### 2.4 状态栏
 
 | 字段 | 取值 | 说明 |
 |---|---|---|
 | 监控 | `运行中` / `未运行` | `未运行` 表示文件监听启动失败；检索仍可用，只是不再自动感知增删改，最底下一行红字给出原因 |
-| 索引 | `N 文件` + 阶段百分比 | 已收录文件数；索引进行中追加 `· 扫描 NN%` / `· 语义 NN%` / `· 重排 NN%`，空闲时不显示百分比。扫描阶段查询排队，语义/重排阶段可正常检索 |
+| 索引 | `N 文件` + 阶段百分比 | 已收录文件数；索引进行中追加 `· 扫描 NN%` / `· 语义 NN%`，空闲时不显示百分比。扫描阶段查询排队，语义阶段可正常检索 |
 | 模型 | `加载中` / `就绪` / `未就绪(仅关键词)` / `已禁用` | 只有 `就绪` 时启用语义检索；其余情况退化为纯 BM25 |
 | 重排 | `加载中` / `就绪` / `未就绪` | 仅在 `[rerank] enabled = true` 时显示；`未就绪` 表示重排被跳过，基础检索不受影响 |
 | OCR | `待加载` / `加载中` / `就绪` / `识别中` / `未就绪`，就绪后带 `·GPU` / `·CPU` | 仅在 `[ocr] enabled = true` 且 `[index] textless_pdf = true` 时显示；`·GPU` 表示 DirectML 加速生效，`·CPU` 表示回退 CPU；首次遇到扫描件才加载模型，正在逐页识别时显示 `识别中`，缺文件时显示 `未就绪` |
@@ -373,7 +396,7 @@ Esc 关闭   j/k 滚动
 
 状态栏下面固定保留一行消息区，错误/提示不再挤占状态栏；窗口变窄时状态栏仍可能裁掉后面的次要字段，但错误信息会单独占满整行。
 
-启用重排且正在补索引时状态栏形如：
+启用重排、正在语义索引时状态栏形如：
 
 ```text
 监控: 运行中 | 索引: 1434 文件 · 语义 32% | 模型: 就绪 | 重排: 就绪 | OCR:就绪·GPU | 焦点: 查询
@@ -443,21 +466,22 @@ header_footer_zone_lines = 20
 
 [model]
 enabled = true                    # false = 只建关键词索引，状态栏显示“已禁用”
-dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
+# dir = "D:\\Tools\\models\\bge-small-zh-v1.5" # 省略时找 exe 同目录 models\bge-small-zh-v1.5
 # tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\bge-small-zh" # 缺省与 dir 相同
-file = "model.onnx"
+file = "model.onnx"               # 相对 dir 的 ONNX 路径；标准布局保持默认即可
 batch_size = 32                   # 每批嵌入的文档块数
 max_length = 512                  # 分词最大长度
 
 [rerank]
 enabled = false                   # 可选二次重排，默认关闭
-dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
-# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\gemma" # 缺省与 dir 相同
+dir = "D:\\tools\\rummage\\models\\bge-reranker-base"
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\reranker-base" # 缺省与 dir 相同
 file = "onnx/model_quantized.onnx" # 相对 dir 的 ONNX 路径
 top_n = 5                         # 只重排基础排序的前 N 个文件
-weight = 0.5                      # Gemma 分数权重；0 等于不重排，1 等于完全按 Gemma 排
-batch_size = 16                   # 每批嵌入的文档块数
-max_length = 1024                 # 分词最大长度
+chunks = 3                        # 每个文件取前 K 个候选块送进交叉编码器
+weight = 0.75                     # 重排分权重；0 等于不重排，1 等于完全按重排分排
+batch_size = 16                   # 每批送入的 (查询, 块) 对数
+max_length = 512                  # 分词最大长度
 ```
 
 `[search]` 控制检索规模：`candidates` 是关键词、语义两路各自先取的**分块**候选数，聚合到文件后再截断到 `results` 条。两者都必须大于 0；省略时保持旧行为（50 / 10）。把 `results` 调大后，`Enter` 详情、`j`/`k` 选择和翻页照常工作，终端高度不够时仍按页滚动。
@@ -468,14 +492,13 @@ max_length = 1024                 # 分词最大长度
 
 `[index] textless_pdf` 是更上层的总开关：`false` 时完全不处理无文字层 PDF（不 OCR、也不进入索引）；`true` 时才允许 OCR 回退。若 OCR 也未启用、模型缺失或识别失败，仍然不会为无文字层 PDF 建空索引。想保留普通 PDF、完全跳过扫描件，设 `textless_pdf = false`；想保留扫描件 OCR、只是临时缺模型，保持 `true` 并看日志里的降级原因。
 
-`[rerank]` 用 EmbeddingGemma 2 对**基础排序的前 `top_n` 个文件**做混合重排：基础分与 Gemma 相似度各自归一化后按 `weight` 加权。第 `top_n + 1` 名及以后完全不动，所以它只影响“哪份文件排第一”，不会把弱相关文件拉进结果。
+`[rerank]` 用 `bge-reranker-base` 交叉编码器对**基础排序的前 `top_n` 个文件**做混合重排：每个文件取候选块中分数最高的 `chunks` 个，把 `(查询, 块)` 逐对送进模型取最高分作为文件分；基础分与重排分各自归一化后按 `weight` 加权。第 `top_n + 1` 名及以后完全不动，所以它只影响“哪份文件排第一”，不会把弱相关文件拉进结果。
 
-- 默认关闭：不加载重排模型、不写 `rerank.bin`、检索行为与没有这个功能时完全一致
-- 打开后首次索引会为每个文件额外计算重排向量，耗时约为仅主模型的数倍；日常启动按文件哈希与已有向量续跑
-- 若前 `top_n` 个文件的重排向量不全、Gemma 分数全部相同或查询为空，则保持基础排序
+- 默认关闭：不加载重排模型，检索路径与没有这个功能时完全一致；语义索引也不需要为重排多算或落盘任何东西
+- 重排在查询时执行，启用后每次查询多约 1 秒（默认 15 对，量化模型约 70ms/对），只影响前 `top_n` 名
+- 若重排分全部相同（例如候选块都一样）或查询为空，则保持基础排序
 - 重排模型缺失/损坏/推理失败时只把状态标为 `重排: 未就绪` 并在红字里说明，基础检索不受影响
-- 实测（125 个 OFD、手写评测集）：难查询的 MRR 从 0.556 提升到 0.641，简单查询持平；整体提升约 1.2 个百分点，统计上不显著，单次查询多约 0.3 秒。是否值得开由使用场景决定
-- 关闭后 `rerank.bin` 不会被删除，再次打开时若模型标识与维度未变可直接复用
+- 实测（125 个 OFD、187 条手写查询，同一套 RRF 基线）：bge-small 的 MRR 从 0.895 提升到 0.928、nDCG 从 0.908 提升到 0.930；bge-base 从 0.910 / 0.923 提升到 0.943 / 0.947。难查询（口语化改写）提升最明显
 
 路径解析：
 
@@ -567,13 +590,12 @@ names = ["~$*"]
 ```text
 D:\docs\.rummage\
 ├── index.sqlite3   # 路径、大小、mtime、内容哈希、归一化文本、分块数、嵌入状态（WAL）
-├── index.bin       # BM25 倒排 + 向量图快照（含 magic、版本、模型标识、维度）
-└── rerank.bin      # 可选：每个文件的重排块向量（仅在启用 [rerank] 时生成）
+└── index.bin       # BM25 倒排 + 向量图快照（含 magic、版本、模型标识、维度）
 ```
 
 - 快照采用临时文件 + fsync + rename 原子落盘；文件事件处理完、每批嵌入完成后都会更新
 - 启动时校验快照与 SQLite 是否一致：分块数不符会重建词法索引，向量缺失会重新嵌入，模型或维度变化会整体重建
-- `rerank.bin` 带模型标识与维度；重排模型换了会整体重建重排向量，文件增删改只重算受影响的文件
+- 重排模型不在索引目录里留任何副本；开关重排或更换重排模型都不需要重建索引
 - 原文 `.md` 只读，索引内容与原始文件完全分开
 
 ### 4.1 重建索引
@@ -616,12 +638,6 @@ D:\tools\rummage\rummage.exe --dir D:\docs
 - 多个根目录共用同一个索引目录（默认是第一个根目录下的 `.rummage`），删一次即可全部清空
 - 索引目录里还有 SQLite 的 `-wal` / `-shm` 和临时文件，随目录一起删除即可
 - 程序没有单独的 `purge` / `rebuild` 子命令；删除目录再启动就是官方做法
-
-只想重建重排向量时，删除 `rerank.bin` 后重启即可，不必重建整个索引：
-
-```powershell
-Remove-Item -Force D:\docs\.rummage\rerank.bin
-```
 
 只想让某些目录/文件退出索引、但保留其余索引时，不要删目录：用 `[ignore]` 或命令行 `--ignore` 排除后重启，扫描完成时会把已收录但不再命中的文件移出索引。
 
@@ -711,17 +727,19 @@ cargo build --release --no-default-features
 | 启动即退出，提示 `未指定监控目录` | 既没给 `--dir`，配置里也没有 `[watch] roots`。补上其一 |
 | 提示 `监控目录不存在或不可访问` | `--dir` 路径写错，或网络盘未挂载 |
 | 提示配置文件不存在 / 解析失败 | `--config` 路径写错，或 TOML 语法错误（注意 Windows 路径要写双反斜杠） |
-| 状态栏 `模型: 未就绪(仅关键词)` | 模型目录里缺文件或 `model.onnx` 损坏。按 1.1 的五个文件核对；最底下一行红字有具体原因。检索仍可用，只是没有语义能力 |
+| 状态栏 `模型: 未就绪(仅关键词)` | 模型目录里缺文件或 `model.onnx` 损坏。按 1.1 核对 ONNX 与 tokenizer 文件；最底下一行红字有具体原因。检索仍可用，只是没有语义能力 |
+| 想换质量更好的 bge-base | 先 `rummage.exe models download --only bge-base`，再把 `[model] dir` 指向 `bge-base-zh-v1.5` 目录并重启；同一个索引目录会按新模型重建，旧 bge-small 向量不再复用。想同时保留两套索引，给两个模型配不同的 `[index] dir`，各自打开时都会检查是否超过 30 天未使用 |
+| 消息区提示 `索引已 N 天未检索；若不再使用可删除 …` | 该索引超过 30 天没有被检索。若确实不再使用，关闭程序后删除提示里的索引目录即可；继续检索一次后提示消失 |
 | tokenizer 文件和 ONNX 不想放一起 | 在 `[model]` / `[rerank]` 写 `tokenizer_dir` 指向 tokenizer 所在目录；相对路径按配置文件目录解析，缺省时仍用模型目录 |
 | 状态栏 `重排: 未就绪` | 只影响可选的二次重排：检查 `[rerank] dir` / `file` 与 `tokenizer.json` 是否存在；基础关键词+语义检索不受影响。最底下一行红字有具体原因 |
-| 启用重排后首次索引很慢 | 重排模型要为每个文件再算一遍分块向量，耗时约为仅主模型的数倍；完成后按哈希与已有向量续跑，后续启动不会重算 |
+| 启用重排后查询变慢 | 重排是查询时对前 `top_n` 个文件的 `chunks` 个候选块逐对推理；把 `top_n` / `chunks` 调小可提速，默认 15 对约 1 秒 |
 | 状态栏 `监控: 未运行` | 文件监听启动失败（多为权限或路径问题）。检索可用，增删改需重启程序才生效；最底下一行红字给出原因 |
-| 状态栏一直显示 `· 扫描` / `· 语义` / `· 重排`、文件数不动 | 正在首次全量索引，看百分比即可判断是否在推进；`Esc` 可中断，下次续跑 |
+| 状态栏一直显示 `· 扫描` / `· 语义`、文件数不动 | 正在首次全量索引，看百分比即可判断是否在推进；`Esc` 可中断，下次续跑 |
 | 首次启动很慢 | 语义向量计算是主要开销；文档多时可先用 `[model] enabled = false` 只建关键词索引 |
 | 检索结果少于预期 | 默认最多 10 条（小终端 5 条，可用 `[search] results` 调整）；确认文件后缀在 `[index] extensions` 中（默认 `.md` / `.markdown` / `.docx` / `.pdf` / `.ofd`），且不在忽略目录中 |
 | 想调整候选数量 / 结果条数 | 在 `[search]` 写 `candidates`（每路分块候选，默认 50）和 `results`（最终文件数，默认 10），重启生效；两者必须大于 0 |
 | 怎么重建 / 清理索引 | 关闭程序后删除索引目录再启动，见 [4.1](#41-重建索引) 与 [4.2](#42-清理索引)；默认是第一个根目录下的 `.rummage`，配置了 `[index] dir` 时删那个目录 |
-| 退出时还在索引，进程要等一会 | 退出会先停止调度，正在计算的一小批（`[model]` / `[rerank]` 的 `batch_size`）完成后落盘退出；调小 `batch_size` 可更快退出，但索引吞吐会下降 |
+| 退出时还在索引，进程要等一会 | 退出会先停止调度，正在计算的一小批（`[model] batch_size`）完成后落盘退出；调小 `batch_size` 可更快退出，但索引吞吐会下降 |
 | 能否索引 Word / PDF / OFD？ | `.docx`、带文字层的 `.pdf` 和 `.ofd` 默认就会索引；旧版 `.doc`、Excel、PPT 暂不支持。扫描件 PDF 和纯图片 OFD 需要先做 OCR 转成文字，本程序不内置 OCR |
 | 扫描版 PDF / 纯图片 OFD 搜不到 | 先确认 `[index] textless_pdf = true`、`[ocr] enabled = true`，且 `pdfium.dll`、`models\ocr\det.onnx` / `rec.onnx` / `dict.txt` 齐全；缺文件时日志会写明原因。OFD 目前仍只支持有文字层。也可以用外部 OCR 工具生成文字版 PDF |
 | 完全不想处理扫描件 | 在 `[index]` 设 `textless_pdf = false`，无文字层 PDF 会直接跳过，不 OCR、不进入索引 |
@@ -752,7 +770,7 @@ cargo build --release --no-default-features
 3. **ONNX Runtime 静态库**：`ort` 开启了 `download-binaries`，默认构建时会下载静态库。内网构建前，把外网机器上的
    `%LOCALAPPDATA%\ort.pyke.io\dfbin\x86_64-pc-windows-msvc\<哈希>\` 目录整体带入内网，并设置 `ORT_LIB_LOCATION` 指向它。
    然后 `cargo build --release --offline` 即可，不再联网。
-4. **模型文件**：按 1.1 的目录布局整体复制；启用重排时再带上 `models\embeddinggemma-2\`。
+4. **模型文件**：按 1.1 的目录布局整体复制；启用重排时再带上 `models\bge-reranker-base\`。
 5. **最简单的方式**：直接分发外网编译好的 `rummage.exe` + `models\` 目录。运行时不需要 Rust，也不需要额外分发 ONNX Runtime DLL。
 
 ---
@@ -772,7 +790,7 @@ cargo build --release
 产物为 `target\release\rummage.exe`。注意它默认在自身同目录找模型，见 1.1。
 
 ```powershell
-cargo test                              # 138 个单元测试 + 2 个监控集成测试，不需要模型
+cargo test                              # 144 个单元测试 + 2 个监控集成测试，不需要模型
 cargo test --test e2e_model -- --ignored # 真实 ONNX 模型端到端（需 models\ 下的文件）
 cargo clippy --all-targets
 ```
@@ -780,13 +798,13 @@ cargo clippy --all-targets
 本机已实测：
 
 - 真实模型下中文自然语言查询的语义排序正确；重启后快照复用，仍可检索
-- 启用重排后真实 TUI 实测（10 份 OFD）：状态栏出现 `重排: 就绪`，`rerank.bin` 生成 768 维向量且文件数、块数与 SQLite 一致；query 前 5 名顺序相对关闭重排时发生变化
-- 重启后重排向量直接复用（`rerank.bin` 内容哈希不变、无重新嵌入）；`enabled = false` 时不显示重排状态、结果回到基础排序；模型目录缺失时显示 `重排: 未就绪` 并在红字给出原因，基础检索与结果列表不受影响
+- 启用重排后真实索引实测（125 份 OFD、187 条查询）：`bge-reranker-base` 在查询时对前 5 个文件的各 3 个候选块打分，bge-small 的混合 MRR 0.895→0.928、nDCG 0.908→0.930；bge-base 0.910/0.923→0.943/0.947
+- `[rerank] enabled = false` 时不显示重排状态、结果回到基础排序；模型目录缺失时显示 `重排: 未就绪` 并在红字给出原因，基础检索与结果列表不受影响
 - 真实 TUI（Windows PTY，110×30）：查询、结果路径、状态栏（监控/索引数/模型/焦点）渲染正常
 - 结果摘录（90×20 真实 PTY，12 份文档）：每条结果下显示最佳块摘录，命中词为黄色加粗；连续下移 9 次后按页滚动，选中项与可见条数正确，索引仍只写在 `index\` 内
 - `Tab` 切换焦点（结果区底部出现 `c 复制路径 / j/k 选择 / Enter 详情` 提示）、`↑/↓/j/k` 选择、`c` 复制路径（读取系统剪贴板核对内容）、`Esc` 退出
-- 详情叠层（110×30 真实 PTY，4 份文档 + 真实 bge/Gemma）：结果区按 `Enter` 显示关键词/语义名次、RRF 融合分、Gemma 重排分与名次变化、最佳块全文；`j` 滚动不误移动列表，第一次 `Esc` 只关闭叠层且进程存活，第二次 `Esc` 才退出，索引仍写在监控目录外
-- 索引进度（120×20 真实 PTY，1200 份 Markdown + 真实 bge/Gemma）：状态栏依次出现 `· 扫描 0%…98%`、`· 语义 0%…98%`、`· 重排 0%…98%`；全部完成后百分比消失，回到 `索引: 1200 文件`，随后的查询结果正常
+- 详情叠层（110×30 真实 PTY，4 份文档 + 真实 bge/reranker）：结果区按 `Enter` 显示关键词/语义名次、RRF 融合分、交叉编码器重排分与名次变化、最佳块全文；`j` 滚动不误移动列表，第一次 `Esc` 只关闭叠层且进程存活，第二次 `Esc` 才退出，索引仍写在监控目录外
+- 索引进度（120×20 真实 PTY，1200 份 Markdown + 真实 bge）：状态栏依次出现 `· 扫描 0%…98%`、`· 语义 0%…98%`；全部完成后百分比消失，回到 `索引: 1200 文件`，随后的查询结果正常
 - 79×19 降级布局：隐藏状态栏、只显示 5 条、显示“终端过小”
 - 运行中新增/删除 Markdown：状态栏文件数 1→2→1，新增文件可立即检索
 - 运行中新增/删除目录局部规则文件：状态栏文件数 2→1→2，无需重启
@@ -816,8 +834,8 @@ src/
 ├── query.rs       dir:/name:/"短语" 解析
 ├── tokenize.rs    jieba 分词 + 中文停用词
 ├── store.rs       SQLite 元数据
-├── embed.rs       fastembed/ONNX 嵌入
-├── rerank.rs      EmbeddingGemma 2 二次重排：加载、块向量、混合排序、持久化
+├── embed.rs       bge 句向量 ONNX 嵌入：bge-small / bge-base、CLS 池化
+├── rerank.rs      bge-reranker 交叉编码器二次重排：配对打分与混合排序
 ├── persist.rs     bincode 快照原子读写
 ├── engine.rs      混合索引、增量更新、检索与聚合
 ├── watcher.rs     notify + 防抖
@@ -831,7 +849,8 @@ tests/               模型端到端、监控集成测试
 
 ## 八、与需求 v1.3 的差异
 
-- **向量维度是 512，不是 384**：`BAAI/bge-small-zh-v1.5` 与 `Xenova/bge-small-zh-v1.5` 的 `hidden_size` 都是 512（`config.json` 可查）。代码在加载时动态探测维度并写入快照，不硬编码。
+- **向量维度由模型决定**：bge-small-zh-v1.5 是 512 维、bge-base-zh-v1.5 是 768 维，代码在加载时动态探测并写入快照，不硬编码。
+- **语义模型可选**：需求只指定 bge-small；现额外支持 bge-base-zh-v1.5（质量更高、约 6 倍建索引时间），改 `[model] dir` 即可切换，不引入其他模型。
 - **退出键是 `Esc` 而非 `q`**：需求表格写的是 `q` 全局退出，但那样查询框内无法输入英文 `q`。现改为 `Esc`（详情层内先关闭叠层）或 `Ctrl+C` 退出；`c` 仅在结果焦点复制。
 - **文档分块**：约 1024 字节、重叠 128 字节；检索结果按文件聚合取最高分，满足“定位到文件、不要求段落级”的要求。
 - **中文停用词**：jieba 分词后过滤“的/了/是/如何/怎样”等虚词，避免 BM25 被“的”这类高频字带偏、压过语义排序。
@@ -844,4 +863,5 @@ tests/               模型端到端、监控集成测试
 - **PDF 中文字体编码**：内置解析器原本只认 `Identity-H`，遇到 `UniGB-UCS2-H` / `GBK-EUC-H` 会直接 panic。现用仓库内 vendored 版本补上这几类预定义 CMap 的直接解码，并把逐份提取改为逐页提取：损坏页计入跳过，其余页文字保留，解析器 panic 不再打印到终端。
 - **PDF 解析健壮性**：继续收口 vendored 解析器的 panic 分支：未知 simple-font `/Encoding` 回退到默认表、`Differences` 越界跳过、缺 `MediaBox` 用 Letter 尺寸、路径操作符缺操作数时忽略而不是 abort、`Tf`/`gs`/`Do` 引用缺失对象时跳过、损坏 UTF-16 不 panic、颜色空间与函数解析异常降级。594 页实测文件由 5 页 panic 降为 0；109 份高风险样本逐页 panic 为 0。
 - **扫描件 OCR**：需求之外增加页级 OCR 回退：PDFium 渲染 + RapidOCR/PP-OCRv4 ONNX，只处理缺少文字层的页，结果缓存到索引目录；模型或 DLL 缺失时自动降级，不影响普通 PDF。默认开启，可用 `[ocr] enabled = false` 关闭。
-- **可选二次重排**：需求之外的排序增强。用 EmbeddingGemma 2 对基础排序前 5 名做混合重排，默认关闭；通过 `[rerank]` 打开，关闭时零开销。它不替代主检索链路，模型不可用时只降级重排本身。
+- **可选二次重排**：需求之外的排序增强。用 `bge-reranker-base` 对基础排序前 5 名文件的候选块做交叉编码器打分，默认关闭；通过 `[rerank]` 打开，关闭时零开销。它不替代主检索链路，模型不可用时只降级重排本身。
+- **索引闲置提示**：索引超过 30 天没有被检索时，消息区黄字建议删除索引目录；不使用额外后台任务，只在启动时检查 SQLite 里的 `last_used`（旧索引回退到 `index.bin` 的修改时间）。

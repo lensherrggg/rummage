@@ -82,31 +82,35 @@ header_footer_zone_lines = 20
 
 [model]
 enabled = true
+# 语义模型：bge-small-zh-v1.5（默认）或 bge-base-zh-v1.5，用 dir 切换
 # 省略时依次尝试 RUMMAGE_MODEL_DIR、exe目录\models\bge-small-zh-v1.5
-# dir = "D:\\tools\\rummage\\models\\bge-small-zh-v1.5"
+# dir = "D:\\Tools\\models\\bge-base-zh-v1.5"
 # tokenizer 文件单独存放时指定；省略则与 dir 相同
 # tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\bge-small-zh"
-file = "model.onnx"
+# ONNX 文件名；标准布局保持 model.onnx，导出在 onnx\ 子目录时改为 onnx/model.onnx
+# file = "model.onnx"
 batch_size = 32
 max_length = 512
 
 [rerank]
-# 可选：用 EmbeddingGemma 2 对基础排序的前 top_n 个文件做二次排序。
-# 默认关闭；关闭时不加载模型、不生成重排向量、检索行为与原来完全一致。
-# 打开后需要约 300MB 的量化 ONNX 模型和 tokenizer.json；首次索引会明显变慢。
+# 可选：用 bge-reranker 交叉编码器对基础排序的前 top_n 个文件做二次排序。
+# 默认关闭；关闭时不加载模型，检索路径与原来完全一致。
+# 打开后需要约 280MB 的量化 ONNX 模型和 tokenizer.json；开销在查询时（约 1 秒/次）。
 enabled = false
-# 省略时依次尝试 RUMMAGE_RERANK_MODEL_DIR、exe目录\models\embeddinggemma-2
-# dir = "D:\\tools\\rummage\\models\\embeddinggemma-2"
+# 省略时依次尝试 RUMMAGE_RERANK_MODEL_DIR、exe目录\models\bge-reranker-base
+# dir = "D:\\tools\\rummage\\models\\bge-reranker-base"
 # tokenizer 文件单独存放时指定；省略则与 dir 相同
-# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\gemma"
+# tokenizer_dir = "D:\\tools\\rummage\\models\\tokenizers\\reranker-base"
 # 相对 dir 的 ONNX 路径；HF 导出目录通常是 onnx/model_quantized.onnx
 file = "onnx/model_quantized.onnx"
 # 只重排基础排序的前几个文件；后面的名次保持不变
 top_n = 5
-# Gemma 分数的混合权重：0 等于不重排，1 等于完全按 Gemma 排序
-weight = 0.5
+# 每个文件取前几个候选块送进交叉编码器，取最高分作为文件分
+chunks = 3
+# 重排分数的混合权重：0 等于不重排，1 等于完全按重排分排序
+weight = 0.75
 batch_size = 16
-max_length = 1024
+max_length = 512
 
 # 目录局部规则
 # 在被监控的任意子目录里新建 .rummage.toml，该子树就完全改用它的规则，

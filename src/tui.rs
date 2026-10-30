@@ -99,6 +99,7 @@ impl App {
                 indexing: true,
                 progress: None,
                 last_error: None,
+                notice: None,
             },
             watching,
             toast: initial_error.map(|e| (e, Instant::now())),
@@ -843,7 +844,6 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect, page: Option<PageInfo>)
             let phase = match progress.phase {
                 IndexPhase::Scan => "扫描",
                 IndexPhase::Embed => "语义",
-                IndexPhase::Rerank => "重排",
             };
             format!(" · {phase} {}%", progress.percent())
         }
@@ -896,13 +896,14 @@ fn draw_message(frame: &mut Frame, app: &App, area: Rect) {
     let message = app
         .toast
         .as_ref()
-        .map(|(message, _)| message.clone())
-        .or_else(|| app.status.last_error.clone());
-    if let Some(message) = message {
+        .map(|(message, _)| (message.clone(), Color::Red))
+        .or_else(|| app.status.last_error.clone().map(|m| (m, Color::Red)))
+        .or_else(|| app.status.notice.clone().map(|m| (m, Color::Yellow)));
+    if let Some((message, color)) = message {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 fit_left(&message, area.width as usize),
-                Style::default().fg(Color::Red),
+                Style::default().fg(color),
             ))),
             area,
         );
@@ -948,6 +949,7 @@ mod tests {
             indexing: false,
             progress: None,
             last_error: None,
+            notice: None,
         };
         app.hits = (0..n)
             .map(|i| FileHit {
@@ -1014,6 +1016,19 @@ mod tests {
     }
 
     #[test]
+    fn stale_index_notice_shows_in_message_area_but_error_wins() {
+        let mut app = app_with_hits(1);
+        app.status.notice = Some("索引已 31 天未检索；若不再使用可删除 D:\\docs\\.rummage".to_string());
+        let text = render(&app, 100, 20);
+        assert!(text.contains("31 天未检索"), "{text}");
+
+        app.status.last_error = Some("真实错误".to_string());
+        let text = render(&app, 100, 20);
+        assert!(text.contains("真实错误"), "{text}");
+        assert!(!text.contains("31 天未检索"), "{text}");
+    }
+
+    #[test]
     fn status_bar_shows_ocr_status_when_enabled() {
         let mut app = app_with_hits(3);
         app.ocr_status = OcrStatus::Ready;
@@ -1056,12 +1071,8 @@ mod tests {
             total: 3,
         });
         assert!(render(&app, 100, 20).contains("· 语义 33%"));
-        app.status.progress = Some(IndexProgress {
-            phase: IndexPhase::Rerank,
-            done: 4,
-            total: 5,
-        });
-        assert!(render(&app, 100, 20).contains("· 重排 80%"));
+        app.status.progress = None;
+        assert!(render(&app, 100, 20).contains("重排: 就绪"));
     }
 
     #[test]

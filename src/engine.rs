@@ -4,7 +4,7 @@ use crate::extract::extract_text;
 use crate::normalize::{normalize, normalize_query};
 use crate::persist;
 use crate::query::ParsedQuery;
-use crate::rerank::{self, GemmaEmbedder, RerankStore};
+use crate::rerank::{self, CrossEncoder};
 use crate::store::{Store, StoredFile};
 use crate::tokenize;
 use anyhow::Result;
@@ -40,7 +40,10 @@ const SNIPPET_CONTEXT: usize = 24;
 const SNIPPET_HIGHLIGHTS: usize = 24;
 const FALLBACK_DIMS: usize = 512;
 const INDEX_FILE: &str = "index.bin";
-const RERANK_FILE: &str = "rerank.bin";
+const LAST_USED_META: &str = "last_used";
+const TOUCH_INTERVAL_SECS: i64 = 3600;
+const STALE_INDEX_DAYS: i64 = 30;
+const SECS_PER_DAY: i64 = 86_400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStatus {
@@ -54,7 +57,6 @@ pub enum ModelStatus {
 pub enum IndexPhase {
     Scan,
     Embed,
-    Rerank,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub struct IndexStatus {
     /// Only present while `indexing` is true and a phase is actively working.
     pub progress: Option<IndexProgress>,
     pub last_error: Option<String>,
+    /// Non-error suggestion shown in the message area (e.g. a stale index).
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,7 +130,7 @@ pub struct HitDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RerankDetail {
-    /// Raw Gemma similarity.
+    /// Raw cross-encoder relevance score of the file's best chunk.
     pub score: f64,
     /// Configured blend weight of the rerank score.
     pub weight: f64,
@@ -173,12 +177,10 @@ pub struct IndexEngine {
     index_model_id: String,
     model: Option<Embedder>,
     model_status: ModelStatus,
-    rerank_model: Option<GemmaEmbedder>,
+    rerank_model: Option<CrossEncoder>,
     rerank_status: ModelStatus,
-    rerank: RerankStore,
-    rerank_pending: VecDeque<i64>,
-    rerank_pending_set: HashSet<i64>,
     rerank_top_n: usize,
+    rerank_chunks: usize,
     rerank_weight: f64,
     rerank_batch_size: usize,
     leg_top_k: usize,
@@ -188,10 +190,10 @@ pub struct IndexEngine {
     pending_set: HashSet<i64>,
     embed_done: usize,
     embed_total: usize,
-    rerank_done: usize,
-    rerank_total: usize,
     scan_progress: Option<IndexProgress>,
     last_error: Option<String>,
+    notice: Option<String>,
+    last_used: i64,
     batch_size: usize,
 }
 
@@ -258,7 +260,7 @@ impl IndexEngine {
 
         let (rerank_model, rerank_status) = if cfg.rerank.enabled {
             let loaded = environment.as_ref().map(|env| {
-                GemmaEmbedder::load(
+                CrossEncoder::load(
                     env,
                     &rerank_dir,
                     &cfg.rerank.file,
@@ -267,10 +269,7 @@ impl IndexEngine {
                 )
             });
             match loaded {
-                Some(Ok(m)) => {
-                    let dims = m.dims();
-                    (Some(m), ModelStatus::Ready { dims })
-                }
+                Some(Ok(m)) => (Some(m), ModelStatus::Ready { dims: 0 }),
                 Some(Err(err)) => (
                     None,
                     ModelStatus::Unavailable {
@@ -288,25 +287,6 @@ impl IndexEngine {
             (None, ModelStatus::Disabled)
         };
 
-        let rerank_store = match &rerank_model {
-            Some(m) => match rerank::load(&index_dir.join(RERANK_FILE)) {
-                Ok(Some(s)) if s.dims == m.dims() && s.model_id == m.id() => s,
-                Ok(Some(_)) => {
-                    if last_error.is_none() {
-                        last_error = Some("重排模型已变更，将重建重排索引".to_string());
-                    }
-                    RerankStore::new(m.id(), m.dims())
-                }
-                Ok(None) => RerankStore::new(m.id(), m.dims()),
-                Err(err) => {
-                    if last_error.is_none() {
-                        last_error = Some(format!("重排索引损坏，将重建：{err}"));
-                    }
-                    RerankStore::new(m.id(), m.dims())
-                }
-            },
-            None => RerankStore::default(),
-        };
         if cfg.rerank.enabled
             && last_error.is_none()
             && matches!(rerank_status, ModelStatus::Unavailable { .. })
@@ -363,9 +343,21 @@ impl IndexEngine {
             )
         };
 
+        let now = unix_now();
+        let last_used = store
+            .meta(LAST_USED_META)?
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| index_mtime_secs(&index_dir.join(INDEX_FILE)))
+            .unwrap_or(now);
+        let notice = stale_notice(&index_dir, last_used, now, files.len());
+        if let Some(text) = &notice {
+            log::warn!("{text}");
+        }
+
         let mut engine = Self {
             batch_size: cfg.model.batch_size.max(1),
             rerank_top_n: cfg.rerank.top_n,
+            rerank_chunks: cfg.rerank.chunks,
             rerank_weight: cfg.rerank.weight,
             rerank_batch_size: cfg.rerank.batch_size.max(1),
             leg_top_k: cfg.search.candidates.max(1),
@@ -382,18 +374,15 @@ impl IndexEngine {
             model_status,
             rerank_model,
             rerank_status,
-            rerank: rerank_store,
-            rerank_pending: VecDeque::new(),
-            rerank_pending_set: HashSet::new(),
             files,
             pending: VecDeque::new(),
             pending_set: HashSet::new(),
             embed_done: 0,
             embed_total: 0,
-            rerank_done: 0,
-            rerank_total: 0,
             scan_progress: None,
             last_error,
+            notice,
+            last_used,
         };
 
         if loaded {
@@ -402,7 +391,6 @@ impl IndexEngine {
             engine.rebuild_lexical_index()?;
         }
         engine.queue_missing_embeddings();
-        engine.queue_missing_rerank();
         Ok(engine)
     }
 
@@ -417,12 +405,6 @@ impl IndexEngine {
                 done: self.embed_done,
                 total: self.embed_total,
             })
-        } else if self.has_pending_rerank() {
-            Some(IndexProgress {
-                phase: IndexPhase::Rerank,
-                done: self.rerank_done,
-                total: self.rerank_total,
-            })
         } else {
             None
         };
@@ -433,6 +415,7 @@ impl IndexEngine {
             indexing,
             progress,
             last_error: self.last_error.clone(),
+            notice: self.notice.clone(),
         }
     }
 
@@ -460,16 +443,24 @@ impl IndexEngine {
         self.last_error = Some(message);
     }
 
+    /// 每次检索后刷新“最近使用”时间；闲置提示在该索引真正被用到后消失。
+    fn touch_last_used(&mut self) {
+        self.notice = None;
+        let now = unix_now();
+        if now - self.last_used >= TOUCH_INTERVAL_SECS {
+            if let Err(err) = self.store.set_meta(LAST_USED_META, &now.to_string()) {
+                log::warn!("记录索引使用时间失败：{err}");
+            }
+            self.last_used = now;
+        }
+    }
+
     pub fn has_pending_embeddings(&self) -> bool {
         !self.pending.is_empty() && self.model.is_some()
     }
 
-    pub fn has_pending_rerank(&self) -> bool {
-        !self.rerank_pending.is_empty() && self.rerank_model.is_some()
-    }
-
     pub fn has_pending_work(&self) -> bool {
-        self.has_pending_embeddings() || self.has_pending_rerank()
+        self.has_pending_embeddings()
     }
 
     pub fn scan_lexical(&mut self, progress: impl FnMut(&IndexStatus)) -> Result<()> {
@@ -694,98 +685,6 @@ impl IndexEngine {
         Ok(())
     }
 
-    pub fn next_rerank_batch(&mut self) -> Option<Vec<i64>> {
-        self.rerank_model.as_ref()?;
-        let mut batch = Vec::with_capacity(self.rerank_batch_size);
-        while batch.len() < self.rerank_batch_size {
-            let Some(id) = self.rerank_pending.pop_front() else {
-                break;
-            };
-            self.rerank_pending_set.remove(&id);
-            let eligible = self.files.get(&id).is_some_and(|info| {
-                info.chunks > 0 && !self.rerank.is_complete(id, info.chunks)
-            });
-            if eligible {
-                batch.push(id);
-            } else {
-                self.rerank_done += 1;
-            }
-        }
-        if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }
-    }
-
-    pub fn embed_rerank_documents(&mut self, ids: &[i64]) -> Result<()> {
-        self.embed_rerank_documents_cancellable(ids, || false)
-    }
-
-    /// 与 [`Self::embed_rerank_documents`] 相同，但每个嵌入小批前检查停止信号。
-    pub fn embed_rerank_documents_cancellable(
-        &mut self,
-        ids: &[i64],
-        mut should_stop: impl FnMut() -> bool,
-    ) -> Result<()> {
-        if self.rerank_model.is_none() {
-            return Ok(());
-        }
-        let mut texts = Vec::new();
-        let mut layout: Vec<(i64, usize)> = Vec::new();
-        for id in ids {
-            let Some(info) = self.files.get(id) else {
-                continue;
-            };
-            let chunks = chunk_document(&info.norm_text);
-            layout.push((*id, chunks.len()));
-            texts.extend(
-                chunks
-                    .into_iter()
-                    .map(|chunk| format!("{}{}", rerank::DOC_PREFIX, chunk)),
-            );
-        }
-        if texts.is_empty() {
-            return Ok(());
-        }
-
-        let batch_size = self.rerank_batch_size.max(1);
-        let mut vectors = Vec::with_capacity(texts.len());
-        let mut embed_error = None;
-        {
-            let model = self.rerank_model.as_mut().expect("rerank model checked");
-            for batch in texts.chunks(batch_size) {
-                if should_stop() {
-                    return Ok(());
-                }
-                match model.embed(batch, batch_size) {
-                    Ok(mut embedded) => vectors.append(&mut embedded),
-                    Err(err) => {
-                        embed_error = Some(err);
-                        break;
-                    }
-                }
-            }
-        }
-        if let Some(err) = embed_error {
-            self.note_error(format!("生成重排向量失败，已跳过重排：{err}"));
-            self.rerank_status = ModelStatus::Unavailable {
-                reason: err.to_string(),
-            };
-            self.rerank_model = None;
-            return Ok(());
-        }
-
-        let mut pos = 0usize;
-        for (id, count) in layout {
-            let file_vectors = vectors[pos..pos + count].to_vec();
-            pos += count;
-            self.rerank.set(id, file_vectors);
-            self.rerank_done += 1;
-        }
-        Ok(())
-    }
-
     pub fn persist(&mut self) -> Result<()> {
         persist::save(
             &self.index_dir.join(INDEX_FILE),
@@ -796,9 +695,6 @@ impl IndexEngine {
         self.store
             .set_meta("index_model_id", &self.index_model_id)?;
         self.store.set_meta("index_dims", &self.dims.to_string())?;
-        if !self.rerank.model_id.is_empty() {
-            rerank::save(&self.index_dir.join(RERANK_FILE), &self.rerank)?;
-        }
         Ok(())
     }
 
@@ -949,10 +845,12 @@ impl IndexEngine {
         });
         hits.truncate(self.result_limit);
         let rerank = if mode == SearchMode::Hybrid && !parsed.text.trim().is_empty() {
-            self.rerank_hits(&query_norm, &mut hits)
+            self.rerank_hits(&query_norm, &mut hits, &chunk_scores)
         } else {
             None
         };
+
+        self.touch_last_used();
 
         Ok(hits
             .into_iter()
@@ -1011,6 +909,7 @@ impl IndexEngine {
         &mut self,
         query_norm: &str,
         hits: &mut [(i64, String, f64)],
+        chunk_scores: &HashMap<i64, Vec<(usize, f64)>>,
     ) -> Option<RerankOutcome> {
         if hits.len() < 2 || query_norm.trim().is_empty() {
             return None;
@@ -1023,37 +922,65 @@ impl IndexEngine {
             .iter()
             .map(|(id, _, score)| (*id, *score))
             .collect();
-        let complete = top.iter().all(|(id, _)| {
-            self.files
-                .get(id)
-                .is_some_and(|info| self.rerank.is_complete(*id, info.chunks))
-        });
-        if !complete {
+
+        let mut passages = Vec::new();
+        let mut layout = Vec::with_capacity(n);
+        for (id, _) in &top {
+            let info = self.files.get(id)?;
+            let chunks = chunk_document(&info.norm_text);
+            let mut ranked = chunk_scores.get(id).cloned().unwrap_or_default();
+            ranked.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            let mut picked: Vec<usize> = Vec::with_capacity(self.rerank_chunks);
+            for (idx, _) in &ranked {
+                if picked.len() >= self.rerank_chunks {
+                    break;
+                }
+                if chunks.get(*idx).is_some() && !picked.contains(idx) {
+                    picked.push(*idx);
+                }
+            }
+            if picked.is_empty() && !chunks.is_empty() {
+                picked.push(0);
+            }
+            layout.push(picked.len());
+            passages.extend(
+                picked
+                    .into_iter()
+                    .filter_map(|idx| chunks.get(idx).cloned()),
+            );
+        }
+        if passages.is_empty() {
             return None;
         }
 
-        let prompt = format!("{}{}", rerank::QUERY_PREFIX, query_norm);
-        let query = match self.rerank_model.as_mut() {
-            Some(model) => match model.embed_one(&prompt) {
-                Ok(vector) => vector,
-                Err(err) => {
-                    self.note_error(format!("生成重排查询向量失败，已跳过重排：{err}"));
-                    self.rerank_status = ModelStatus::Unavailable {
-                        reason: err.to_string(),
-                    };
-                    self.rerank_model = None;
-                    return None;
-                }
-            },
-            None => return None,
+        let model = self.rerank_model.as_mut()?;
+        let scores = match model.score(query_norm, &passages, self.rerank_batch_size) {
+            Ok(scores) => scores,
+            Err(err) => {
+                self.note_error(format!("重排推理失败，已跳过重排：{err}"));
+                self.rerank_status = ModelStatus::Unavailable {
+                    reason: err.to_string(),
+                };
+                self.rerank_model = None;
+                return None;
+            }
         };
 
-        let mut gemma = HashMap::with_capacity(n);
-        for (id, _) in &top {
-            let info = self.files.get(id)?;
-            gemma.insert(*id, self.rerank.max_similarity(*id, info.chunks, &query)?);
+        let mut rerank: HashMap<i64, f64> = HashMap::with_capacity(n);
+        let mut pos = 0usize;
+        for ((id, _), count) in top.iter().zip(&layout) {
+            let part = &scores[pos..pos + count];
+            pos += count;
+            let best = part.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            if best.is_finite() {
+                rerank.insert(*id, best);
+            }
         }
-        let order = rerank::blended_top(&top, &gemma, self.rerank_weight)?;
+        let order = rerank::blended_top(&top, &rerank, self.rerank_weight)?;
 
         let mut details = HashMap::with_capacity(n);
         for (after, id) in order.iter().enumerate() {
@@ -1061,7 +988,7 @@ impl IndexEngine {
             details.insert(
                 *id,
                 RerankDetail {
-                    score: *gemma.get(id)?,
+                    score: *rerank.get(id)?,
                     weight: self.rerank_weight,
                     before,
                     after: after + 1,
@@ -1220,12 +1147,6 @@ impl IndexEngine {
         if !old.embedded && old.chunks > 0 && self.model.is_some() {
             self.add_pending(old.id);
         }
-        if old.chunks > 0
-            && self.rerank_model.is_some()
-            && !self.rerank.is_complete(old.id, old.chunks)
-        {
-            self.add_rerank_pending(old.id);
-        }
     }
 
     fn index_file_lexical(
@@ -1271,12 +1192,6 @@ impl IndexEngine {
         if !embedded && self.model.is_some() {
             self.add_pending(id);
         }
-        self.rerank.remove(id);
-        self.rerank_pending_set.remove(&id);
-        self.rerank_pending.retain(|p| *p != id);
-        if !embedded && self.rerank_model.is_some() {
-            self.add_rerank_pending(id);
-        }
         Ok(id)
     }
 
@@ -1304,12 +1219,6 @@ impl IndexEngine {
         }
         if !embedded && self.model.is_some() {
             self.add_pending(id);
-        }
-        if !embedded && self.rerank_model.is_some() {
-            let chunk_count = self.files.get(&id).map(|info| info.chunks).unwrap_or(0);
-            if !self.rerank.is_complete(id, chunk_count) {
-                self.add_rerank_pending(id);
-            }
         }
         Ok(())
     }
@@ -1346,35 +1255,6 @@ impl IndexEngine {
             .collect();
         for id in ids {
             self.add_pending(id);
-        }
-    }
-
-    fn add_rerank_pending(&mut self, id: i64) {
-        if self.rerank_pending.is_empty() && self.rerank_pending_set.is_empty() {
-            self.rerank_done = 0;
-            self.rerank_total = 0;
-        }
-        if self.rerank_pending_set.insert(id) {
-            self.rerank_pending.push_back(id);
-            self.rerank_total += 1;
-        }
-    }
-
-    fn queue_missing_rerank(&mut self) {
-        if self.rerank_model.is_none() {
-            return;
-        }
-        self.rerank.retain_files(|id| self.files.contains_key(&id));
-        let ids: Vec<i64> = self
-            .files
-            .iter()
-            .filter(|(id, info)| {
-                info.chunks > 0 && !self.rerank.is_complete(**id, info.chunks)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            self.add_rerank_pending(id);
         }
     }
 
@@ -1420,9 +1300,6 @@ impl IndexEngine {
             self.store.delete_by_id(id)?;
             self.pending_set.remove(&id);
             self.pending.retain(|p| *p != id);
-            self.rerank_pending_set.remove(&id);
-            self.rerank_pending.retain(|p| *p != id);
-            self.rerank.remove(id);
         }
         Ok(())
     }
@@ -1694,6 +1571,65 @@ fn system_time_ns(time: Option<SystemTime>) -> i64 {
     time.and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0)
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn index_mtime_secs(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs() as i64)
+}
+
+/// 索引超过 [`STALE_INDEX_DAYS`] 天没有被检索时，建议用户删除以释放空间。
+fn stale_notice(index_dir: &Path, last_used: i64, now: i64, files: usize) -> Option<String> {
+    if files == 0 {
+        return None;
+    }
+    let days = (now - last_used) / SECS_PER_DAY;
+    if days < STALE_INDEX_DAYS {
+        return None;
+    }
+    let size = index_size(index_dir);
+    let hint = if size > 0 {
+        format!("（约 {}）", human_size(size))
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "索引已 {days} 天未检索；若不再使用可删除 {} 以释放空间{hint}",
+        index_dir.display()
+    ))
+}
+
+/// 只统计索引目录顶层文件（index.bin、SQLite 及其 WAL/SHM）。
+fn index_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum()
+}
+
+fn human_size(bytes: u64) -> String {
+    const MB: u64 = 1024 * 1024;
+    if bytes >= 1024 * MB {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * MB as f64))
+    } else {
+        format!("{} MB", bytes / MB)
+    }
 }
 
 fn file_name(path: &str) -> &str {
@@ -2165,6 +2101,54 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(engine.status(false).indexed_files, 2);
+    }
+
+    #[test]
+    fn stale_index_suggests_deletion_after_thirty_days() {
+        let dir = tempdir().unwrap();
+        write_doc(dir.path(), "a.md", "闲置索引内容");
+        let mut engine = engine_for(dir.path());
+        engine.scan_lexical(|_| {}).unwrap();
+        assert!(engine.status(false).notice.is_none());
+
+        let old = unix_now() - 31 * SECS_PER_DAY;
+        engine
+            .store
+            .set_meta(LAST_USED_META, &old.to_string())
+            .unwrap();
+        drop(engine);
+
+        let mut engine = engine_for(dir.path());
+        let notice = engine.status(false).notice.expect("应提示索引闲置");
+        assert!(notice.contains("31 天"), "{notice}");
+        assert!(notice.contains(".rummage"), "{notice}");
+
+        engine.search(&crate::query::parse("闲置索引内容")).unwrap();
+        assert!(engine.status(false).notice.is_none());
+        let stored: i64 = engine
+            .store
+            .meta(LAST_USED_META)
+            .unwrap()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(unix_now() - stored < 5);
+    }
+
+    #[test]
+    fn recently_used_index_has_no_notice() {
+        let dir = tempdir().unwrap();
+        write_doc(dir.path(), "a.md", "近期内容");
+        let mut engine = engine_for(dir.path());
+        engine.scan_lexical(|_| {}).unwrap();
+        engine
+            .store
+            .set_meta(LAST_USED_META, &(unix_now() - 3 * SECS_PER_DAY).to_string())
+            .unwrap();
+        drop(engine);
+
+        let engine = engine_for(dir.path());
+        assert!(engine.status(false).notice.is_none());
     }
 
     #[test]

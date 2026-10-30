@@ -65,11 +65,13 @@ target\release\rummage-eval.exe
 --lexical-weight 1.0 --semantic-weight 0.5
 ```
 
-默认关闭重排，避免单路基线被 Gemma 干扰；要测完整链路加：
+默认关闭重排，避免单路基线被交叉编码器干扰；要测完整链路加：
 
 ```powershell
 --rerank
 ```
+
+`--rerank` 只影响 `hybrid`：交叉编码器按 `[rerank] top_n` / `chunks` / `weight` 调整混合排序，单路基线不受影响。
 
 `--top 10` 会同时把 `[search] results` 调到 10，并把 `candidates` 至少调到 10。评估时建议所有模式使用相同的 `--top` 和 `candidates`。
 
@@ -98,6 +100,6 @@ target\release\rummage-eval.exe
 - `index` 必须已经建好；`rummage-eval` 不会扫描文档
 - 标注路径必须和索引中的路径一致；大小写、`/` 与 `\` 会自动归一化
 - `Recall@K` 是相对标注集计算的；未标注文件按不相关处理，不要在报告里把它说成严格全库 Recall
-- 语义模式需要 bge 模型可用；模型缺失时语义结果为空
+- 语义模式需要 `[model]` 指定的句向量模型可用；模型缺失时语义结果为空
 - `--rrf-k` / 权重覆盖发生在加载配置之后；非法值会被 `rummage-eval` 拒绝
 - 对比 OCR 噪声时，干净版和 OCR 版是两个索引，查询文件里的 `relevant` 路径也要分别对应各自索引
